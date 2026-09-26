@@ -47,6 +47,23 @@ interface Category {
   slug: string;
 }
 
+/** Images d'origine des produits Célestime, par slug.
+ *  Sert uniquement de visuel de repli dans l'aperçu admin : sans ça, tous les
+ *  produits sans image enregistrée affichaient la même image (naissance). */
+const SLUG_IMAGES: Record<string, string> = {
+  "etoiles-de-naissance": "/images/naissance.jpg",
+  "etoiles-de-nous-deux": "/images/nous-deux.jpg",
+  "etoiles-de-rencontre": "/images/rencontre.jpg",
+  "notre-journee-a-nous": "/images/journee.jpg",
+  "calendrier-2027": "/images/calendrier.jpg",
+  "carnet-personnalise": "/images/carnet.jpg",
+  "recueil-de-poemes-cosmiques": "/images/poemes.jpg",
+};
+
+function imageForSlug(slug: string): string {
+  return SLUG_IMAGES[slug] ?? "/images/naissance.jpg";
+}
+
 export default function ProductsClient() {
   const [products, setProducts] = useState<Product[] | null>(null);
   const [cats, setCats] = useState<Category[]>([]);
@@ -165,7 +182,7 @@ export default function ProductsClient() {
             <tbody>
               {products.map((p) => {
                 const low = p.variants.filter((v) => !v.oversell && v.stock - (v.reserved ?? 0) <= 5);
-                const mainImg = p.images[0] ?? "/images/naissance.jpg";
+                const mainImg = p.images.find(Boolean) ?? imageForSlug(p.slug);
                 return (
                   <tr key={p.id} className="border-b border-line/50 last:border-0 hover:bg-raised/40">
                     <td className="px-4 py-3">
