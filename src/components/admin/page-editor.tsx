@@ -19,6 +19,7 @@ import {
   type CmsPage,
   type CmsSection,
 } from "@/lib/cms";
+import MediaPicker from "@/components/admin/media-picker";
 
 type Device = "desktop" | "tablet" | "mobile";
 const DEVICE_WIDTH: Record<Device, number> = { desktop: PAGE_WIDTH, tablet: 768, mobile: 390 };
@@ -725,6 +726,7 @@ function PropsPanel({
 }) {
   const s = el.style ?? {};
   const c = el.content ?? {};
+  const [pickerOpen, setPickerOpen] = useState(false);
   return (
     <div>
       <div className="mb-3 flex items-center justify-between">
@@ -786,7 +788,22 @@ function PropsPanel({
       {el.type === "image" && (
         <>
           <p className="mb-1.5 mt-2 text-[10px] tracking-[0.2em] text-faint uppercase">Image</p>
-          <Field label="Source (URL ou /media/…)"><Input v={c.src ?? ""} onChange={(v) => onChangeContent({ src: v })} /></Field>
+          <Field label="Source (médiathèque Blob)">
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <input className={inputCls} value={c.src ?? ""} placeholder="/images/… ou https://…blob…" onChange={(e) => onChangeContent({ src: e.target.value })} />
+                <button onClick={() => setPickerOpen(true)} className="shrink-0 rounded-full bg-gold px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-night hover:bg-goldsoft">
+                  Choisir
+                </button>
+              </div>
+              {c.src && (
+                <div className="overflow-hidden rounded-lg border border-line bg-night">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={c.src} alt="" className="aspect-video w-full object-cover" />
+                </div>
+              )}
+            </div>
+          </Field>
           <Field label="Alt text"><Input v={c.alt ?? ""} onChange={(v) => onChangeContent({ alt: v })} /></Field>
           <div className="grid grid-cols-2 gap-2">
             <Field label="Ajustement">
@@ -800,6 +817,16 @@ function PropsPanel({
             <label className="flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={!!c.shadow} onChange={(e) => onChangeContent({ shadow: e.target.checked })} className="accent-[#c9a86a]" /> Ombre</label>
             <label className="flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={!!c.border} onChange={(e) => onChangeContent({ border: e.target.checked })} className="accent-[#c9a86a]" /> Bordure</label>
           </div>
+          <MediaPicker
+            open={pickerOpen}
+            onClose={() => setPickerOpen(false)}
+            onSelect={(urls) => {
+              if (urls[0]) onChangeContent({ src: urls[0] });
+              setPickerOpen(false);
+            }}
+            selectedUrls={c.src ? [c.src] : []}
+            title="Choisir une image"
+          />
         </>
       )}
       {el.type === "button" && (
