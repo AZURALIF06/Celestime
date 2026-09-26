@@ -1,0 +1,288 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
+export interface MediaItem {
+  id: string;
+  name: string;
+  path: string;
+  url?: string | null;
+  displayUrl: string;
+  size: number;
+  kind: string;
+  mimeType?: string | null;
+  storage: string;
+  createdAt: string;
+}
+
+interface MediaPickerProps {
+  open: boolean;
+  multiple?: boolean;
+  onClose: () => void;
+  onSelect: (urls: string[]) => void;
+  selectedUrls?: string[];
+  title?: string;
+}
+
+export default function MediaPicker({
+  open,
+  multiple = false,
+  onClose,
+  onSelect,
+  selectedUrls = [],
+  title = "Choisir une image",
+}: MediaPickerProps) {
+  const [items, setItems] = useState<MediaItem[]>([]);
+  const [q, setQ] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set(selectedUrls));
+  const [copied, setCopied] = useState<string | null>(null);
+  const [blobEnabled, setBlobEnabled] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const r = await fetch("/api/admin/media");
+      const d = await r.json();
+      if (!r.ok) {
+        setError(d.error ?? `Erreur chargement (${r.status})`);
+        return;
+      }
+      setItems(d.items ?? []);
+      setBlobEnabled(d.blobEnabled ?? false);
+    } catch (e: any) {
+      setError(`Chargement médiathèque échoué: ${e?.message ?? e}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open) {
+      load();
+      setSelected(new Set(selectedUrls));
+    }
+  }, [open, load, selectedUrls]);
+
+  // Fermer avec Escape
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [open, onClose]);
+
+  const upload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    setError(null);
+    try {
+      for (const file of Array.from(files)) {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch("/api/admin/media", { method: "POST", body: fd });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setError(data.error ?? `Échec upload ${file.name}`);
+        }
+      }
+      await load();
+    } catch (e: any) {
+      setError(`Erreur réseau upload: ${e?.message ?? e}`);
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const toggleSelect = (url: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (multiple) {
+        if (next.has(url)) next.delete(url);
+        else next.add(url);
+      } else {
+        next.clear();
+        next.add(url);
+      }
+      return next;
+    });
+  };
+
+  const confirm = () => {
+    if (selected.size === 0) return;
+    onSelect(Array.from(selected));
+    onClose();
+  };
+
+  const filtered = items.filter((i) => {
+    const hay = `${i.name} ${i.path} ${i.url ?? ""}`.toLowerCase();
+    return hay.includes(q.toLowerCase());
+  });
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-6">
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-line bg-[#0e1020] shadow-2xl">
+        {/* Header */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-5 py-4">
+          <div>
+            <h2 className="font-display text-xl text-ink">{title}</h2>
+            <p className="mt-0.5 text-xs text-faint">
+              {multiple ? "Sélection multiple possible" : "Sélection unique"} · {items.length} image{items.length !== 1 ? "s" : ""} ·{" "}
+              {blobEnabled === null ? "Chargement…" : blobEnabled ? "Vercel Blob actif — persistant" : "Blob non configuré — upload échouera en prod"}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => fileRef.current?.click()}
+              disabled={uploading}
+              className="rounded-full bg-gold px-5 py-2 text-xs font-medium tracking-[0.14em] text-night uppercase hover:bg-goldsoft disabled:opacity-50"
+            >
+              {uploading ? "Envoi…" : "+ Importer"}
+            </button>
+            <button
+              onClick={onClose}
+              className="rounded-full border border-line px-4 py-2 text-xs tracking-wide text-muted uppercase hover:text-ink"
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+
+        {/* Toolbar */}
+        <div className="flex flex-wrap items-center gap-3 border-b border-line/50 bg-night/50 px-5 py-3">
+          <input
+            placeholder="Rechercher…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            className="w-64 rounded-lg border border-line bg-night px-3 py-2 text-sm text-ink placeholder:text-faint focus:border-gold"
+          />
+          <span className="text-xs text-faint">{filtered.length} résultat{filtered.length !== 1 ? "s" : ""}</span>
+          <input
+            ref={fileRef}
+            type="file"
+            multiple
+            accept=".jpg,.jpeg,.png,.webp,.svg,.gif,.avif,image/*"
+            className="hidden"
+            onChange={(e) => upload(e.target.files)}
+          />
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-xs text-faint">{selected.size} sélectionnée{selected.size !== 1 ? "s" : ""}</span>
+            <button
+              onClick={confirm}
+              disabled={selected.size === 0}
+              className="rounded-full bg-gold px-6 py-2 text-xs font-medium tracking-[0.14em] text-night uppercase hover:bg-goldsoft disabled:opacity-40"
+            >
+              Utiliser cette image{selected.size > 1 ? "s" : ""}
+            </button>
+          </div>
+        </div>
+
+        {error && (
+          <div className="mx-5 mt-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">
+            ❌ {error}
+          </div>
+        )}
+        {blobEnabled === false && (
+          <div className="mx-5 mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+            ⚠️ Vercel Blob non configuré : BLOB_READ_WRITE_TOKEN absent. En production, créez un Blob Store dans Vercel Dashboard → Storage → Blob Store.
+          </div>
+        )}
+
+        {/* Grid */}
+        <div className="flex-1 overflow-auto p-4">
+          {filtered.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-line p-14 text-center">
+              <p className="text-sm text-faint">
+                {items.length === 0 ? "Aucune image. Importez depuis votre ordinateur — stockage persistant Vercel Blob." : "Aucun résultat."}
+              </p>
+              {items.length === 0 && (
+                <button
+                  onClick={() => fileRef.current?.click()}
+                  className="mt-4 rounded-full border border-line px-5 py-2 text-xs text-muted hover:text-ink"
+                >
+                  Importer une image
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+              {filtered.map((m) => {
+                const url = m.displayUrl || m.url || m.path;
+                const isSelected = selected.has(url);
+                return (
+                  <div
+                    key={m.id}
+                    className={`group relative overflow-hidden rounded-xl border bg-surface/60 transition-all ${
+                      isSelected ? "border-gold ring-1 ring-gold/40" : "border-line hover:border-gold/30"
+                    }`}
+                  >
+                    <button onClick={() => toggleSelect(url)} className="block w-full text-left">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={url}
+                        alt={m.name}
+                        className="aspect-square w-full object-cover"
+                        loading="lazy"
+                        onError={(e) => {
+                          (e.currentTarget as HTMLImageElement).style.display = "none";
+                        }}
+                      />
+                      {isSelected && (
+                        <div className="absolute right-2 top-2 rounded-full bg-gold px-2 py-0.5 text-[10px] font-bold tracking-wide text-night uppercase">
+                          ✓ Sélectionnée
+                        </div>
+                      )}
+                      <div className="absolute left-2 top-2 rounded-full bg-black/60 px-2 py-0.5 text-[9px] tracking-wide text-white/80 uppercase backdrop-blur">
+                        {m.storage === "blob" ? "Blob" : m.storage}
+                      </div>
+                    </button>
+                    <div className="p-2.5">
+                      <p className="truncate text-xs font-medium text-ink" title={m.name}>
+                        {m.name}
+                      </p>
+                      <p className="mt-0.5 truncate font-mono text-[10px] text-faint" title={url}>
+                        {m.size ? `${(m.size / 1024).toFixed(0)} Ko` : ""} {m.kind?.toUpperCase()}
+                      </p>
+                      <div className="mt-1.5 flex gap-1">
+                        <button
+                          onClick={async () => {
+                            await navigator.clipboard.writeText(url).catch(() => {});
+                            setCopied(m.id);
+                            setTimeout(() => setCopied(null), 1500);
+                          }}
+                          className="rounded-full border border-line px-2 py-1 text-[10px] uppercase tracking-wide text-muted hover:text-ink"
+                        >
+                          {copied === m.id ? "Copié !" : "Copier URL"}
+                        </button>
+                        <button
+                          onClick={() => toggleSelect(url)}
+                          className={`rounded-full px-2 py-1 text-[10px] uppercase tracking-wide ${
+                            isSelected ? "bg-gold/20 text-gold" : "border border-line text-muted hover:text-ink"
+                          }`}
+                        >
+                          {isSelected ? "Retirer" : "Choisir"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Footer compat */}
+        <div className="border-t border-line bg-night/30 px-5 py-3 text-[11px] text-faint">
+          Compatible avec anciennes images <code className="rounded bg-raised px-1 py-0.5">/images/…</code> et nouvelles URLs Blob{" "}
+          <code className="rounded bg-raised px-1 py-0.5">https://…blob.vercel-storage.com/…</code>. Les URLs sont stockées dans <code>products.images[]</code>.
+        </div>
+      </div>
+    </div>
+  );
+}

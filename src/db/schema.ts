@@ -172,9 +172,14 @@ export const productVariants = pgTable("product_variants", {
 export const media = pgTable("media", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
-  path: text("path").notNull().unique(),
+  path: text("path").notNull().unique(), // legacy: /media/... or /images/... ; now can hold blob URL for compat
+  url: text("url"), // Vercel Blob public URL (https://...)
   size: integer("size").notNull().default(0),
   kind: text("kind").notNull().default("image"),
+  mimeType: text("mime_type"),
+  width: integer("width"),
+  height: integer("height"),
+  storage: text("storage").notNull().default("blob"), // blob | local | external
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
