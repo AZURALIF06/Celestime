@@ -11,6 +11,8 @@ export interface MediaItem {
   size: number;
   kind: string;
   mimeType?: string | null;
+  width?: number | null;
+  height?: number | null;
   storage: string;
   createdAt: string;
 }
@@ -37,7 +39,7 @@ export default function MediaPicker({
   const [uploading, setUploading] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set(selectedUrls));
   const [copied, setCopied] = useState<string | null>(null);
-  const [blobEnabled, setBlobEnabled] = useState<boolean | null>(null);
+  const [storageReady, setStorageReady] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -51,7 +53,7 @@ export default function MediaPicker({
         return;
       }
       setItems(d.items ?? []);
-      setBlobEnabled(d.blobEnabled ?? false);
+      setStorageReady(d.dbStorageReady ?? false);
     } catch (e: any) {
       setError(`Chargement médiathèque échoué: ${e?.message ?? e}`);
     }
@@ -134,7 +136,7 @@ export default function MediaPicker({
             <h2 className="font-display text-xl text-ink">{title}</h2>
             <p className="mt-0.5 text-xs text-faint">
               {multiple ? "Sélection multiple possible" : "Sélection unique"} · {items.length} image{items.length !== 1 ? "s" : ""} ·{" "}
-              {blobEnabled === null ? "Chargement…" : blobEnabled ? "Vercel Blob actif — persistant" : "Blob non configuré — upload échouera en prod"}
+              {storageReady === null ? "Chargement…" : storageReady ? "Stockage PostgreSQL actif" : "Colonne media.data absente — migration requise"}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -188,9 +190,9 @@ export default function MediaPicker({
             ❌ {error}
           </div>
         )}
-        {blobEnabled === false && (
+        {storageReady === false && (
           <div className="mx-5 mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
-            ⚠️ Vercel Blob non configuré : BLOB_READ_WRITE_TOKEN absent. En production, créez un Blob Store dans Vercel Dashboard → Storage → Blob Store.
+            ⚠️ Colonne <code>media.data</code> absente : appliquez <code>drizzle/0002_media_db_storage.sql</code> sur la base pour activer l&apos;import.
           </div>
         )}
 
@@ -199,7 +201,7 @@ export default function MediaPicker({
           {filtered.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-line p-14 text-center">
               <p className="text-sm text-faint">
-                {items.length === 0 ? "Aucune image. Importez depuis votre ordinateur — stockage persistant Vercel Blob." : "Aucun résultat."}
+                {items.length === 0 ? "Aucune image. Importez depuis votre ordinateur — stockage en base PostgreSQL." : "Aucun résultat."}
               </p>
               {items.length === 0 && (
                 <button
@@ -239,7 +241,7 @@ export default function MediaPicker({
                         </div>
                       )}
                       <div className="absolute left-2 top-2 rounded-full bg-black/60 px-2 py-0.5 text-[9px] tracking-wide text-white/80 uppercase backdrop-blur">
-                        {m.storage === "blob" ? "Blob" : m.storage}
+                        {m.storage === "db" ? "PostgreSQL" : m.storage}
                       </div>
                     </button>
                     <div className="p-2.5">
@@ -279,8 +281,8 @@ export default function MediaPicker({
 
         {/* Footer compat */}
         <div className="border-t border-line bg-night/30 px-5 py-3 text-[11px] text-faint">
-          Compatible avec anciennes images <code className="rounded bg-raised px-1 py-0.5">/images/…</code> et nouvelles URLs Blob{" "}
-          <code className="rounded bg-raised px-1 py-0.5">https://…blob.vercel-storage.com/…</code>. Les URLs sont stockées dans <code>products.images[]</code>.
+          Compatible avec les images existantes <code className="rounded bg-raised px-1 py-0.5">/images/…</code> ; les nouvelles images sont servies par{" "}
+          <code className="rounded bg-raised px-1 py-0.5">/api/media/&lt;id&gt;</code>. Les URLs sont stockées dans <code>products.images[]</code>.
         </div>
       </div>
     </div>

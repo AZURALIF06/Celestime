@@ -170,7 +170,7 @@ function BlogForm({
               </div>
             ) : null}
             <div className="flex gap-2">
-              <input className={inputCls} value={post.cover ?? ""} onChange={(e) => set({ cover: e.target.value || null })} placeholder="/media/… ou https://…blob.vercel-storage.com/…" />
+              <input className={inputCls} value={post.cover ?? ""} onChange={(e) => set({ cover: e.target.value || null })} placeholder="/api/media/… ou /images/…" />
               <button onClick={() => setPickerOpen(true)} className="shrink-0 rounded-full bg-gold px-4 py-2 text-xs font-medium uppercase tracking-wide text-night hover:bg-goldsoft">
                 Choisir
               </button>
