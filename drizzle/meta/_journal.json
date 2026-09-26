@@ -15,6 +15,13 @@
       "when": 1790444201293,
       "tag": "0001_media_blob",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790462698237,
+      "tag": "0002_media_db_storage",
+      "breakpoints": true
     }
   ]
 }

@@ -11,18 +11,19 @@ interface MediaItem {
   size: number;
   kind: string;
   mimeType?: string | null;
+  width?: number | null;
+  height?: number | null;
   storage: string;
   createdAt: string;
 }
 
 interface Diagnostics {
-  hasToken: boolean;
-  isVercel: boolean;
-  vercelEnv: string | null;
-  nodeEnv: string | null;
-  dbHasNewColumns: boolean;
+  storage: string;
+  hasDataColumn: boolean;
+  dbOk: boolean;
   dbError: string | null;
   mediaCount: number;
+  pendingMigration: string | null;
 }
 
 export default function MediaClient() {
@@ -32,7 +33,7 @@ export default function MediaClient() {
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
-  const [blobEnabled, setBlobEnabled] = useState<boolean | null>(null);
+  const [storageReady, setStorageReady] = useState<boolean | null>(null);
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -49,7 +50,7 @@ export default function MediaClient() {
       }
       setItems(d.items ?? []);
       setUsage(d.usage ?? {});
-      setBlobEnabled(d.blobEnabled ?? false);
+      setStorageReady(d.dbStorageReady ?? false);
       setDiagnostics(d.diagnostics ?? null);
     } catch (e: any) {
       setError(`Impossible de charger la médiathèque: ${e?.message ?? e}`);
@@ -100,7 +101,7 @@ export default function MediaClient() {
   };
 
   const del = async (id: string, name: string) => {
-    if (!confirm(`Supprimer "${name}" de la médiathèque ?\nCette action est définitive et supprimera le fichier du stockage Blob.`)) return;
+    if (!confirm(`Supprimer "${name}" de la médiathèque ?\nCette action est définitive et supprimera l'image stockée en base.`)) return;
     setError(null);
     try {
       const res = await fetch("/api/admin/media", {
@@ -160,16 +161,16 @@ export default function MediaClient() {
       <div className="rounded-2xl border border-line bg-surface/60 p-4">
         <div className="flex flex-wrap items-center gap-3">
           <h3 className="text-xs tracking-[0.2em] text-gold uppercase">Statut stockage</h3>
-          {blobEnabled === null ? (
+          {storageReady === null ? (
             <span className="rounded-full bg-raised px-3 py-1 text-[11px] uppercase tracking-wide text-faint">Chargement…</span>
-          ) : blobEnabled ? (
-            <span className="rounded-full bg-emerald-500/15 px-3 py-1 text-[11px] uppercase tracking-wide text-emerald-300">● Vercel Blob actif — stockage persistant</span>
+          ) : storageReady ? (
+            <span className="rounded-full bg-emerald-500/15 px-3 py-1 text-[11px] uppercase tracking-wide text-emerald-300">● PostgreSQL actif — images stockées en base</span>
           ) : (
-            <span className="rounded-full bg-red-500/15 px-3 py-1 text-[11px] uppercase tracking-wide text-red-300">● Vercel Blob non configuré — stockage persistant nécessite BLOB_READ_WRITE_TOKEN</span>
+            <span className="rounded-full bg-red-500/15 px-3 py-1 text-[11px] uppercase tracking-wide text-red-300">● Colonne media.data absente — migration requise</span>
           )}
           {diagnostics && (
             <span className="text-[11px] text-faint">
-              {diagnostics.isVercel ? `Vercel ${diagnostics.vercelEnv ?? ""}` : "Local"} · {diagnostics.nodeEnv} · {diagnostics.mediaCount} images · DB colonnes: {diagnostics.dbHasNewColumns ? "OK" : "MANQUANTES (migration nécessaire)"}
+              Stockage {diagnostics.storage} · {diagnostics.mediaCount} image{diagnostics.mediaCount !== 1 ? "s" : ""} · colonne data : {diagnostics.hasDataColumn ? "OK" : "MANQUANTE"}
             </span>
           )}
           <button onClick={load} className="ml-auto rounded-full border border-line px-3 py-1 text-[11px] uppercase tracking-wide text-muted hover:text-ink">
@@ -177,34 +178,22 @@ export default function MediaClient() {
           </button>
         </div>
 
-        {blobEnabled === false && (
+        {storageReady === false && (
           <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-200">
-            <p className="font-medium">⚠️ Stockage persistant non configuré en production</p>
+            <p className="font-medium">⚠️ Migration base de données requise</p>
             <p className="mt-1">
-              En production Vercel, le disque local est en lecture seule. L&apos;upload échouera sans Vercel Blob.
+              La colonne <code>media.data</code> (bytea) est absente : l&apos;upload est bloqué tant qu&apos;elle n&apos;est pas créée.
+              Aucune donnée existante n&apos;est modifiée, les images <code>/images/…</code> restent servies normalement.
               <br />
-              <strong>Action requise :</strong> Vercel Dashboard → Projet <code>Celestime</code> → Storage → Create → Blob Store → Connect to project → Redeploy.
-              <br />
-              Variable attendue : <code>BLOB_READ_WRITE_TOKEN</code> (auto-injectée). Voir{" "}
-              <a href="https://vercel.com/docs/storage/vercel-blob" target="_blank" className="underline">
-                docs Vercel Blob
-              </a>
-              .
+              <strong>Action requise :</strong> appliquer{" "}
+              <code>{diagnostics?.pendingMigration ?? "drizzle/0002_media_db_storage.sql"}</code> sur la base :
+              <code className="mt-1 block rounded bg-black/30 p-2 font-mono text-[11px]">
+                psql $DATABASE_URL -f {diagnostics?.pendingMigration ?? "drizzle/0002_media_db_storage.sql"}
+              </code>
             </p>
             {diagnostics?.dbError && (
               <p className="mt-2 font-mono text-[11px] text-amber-300/80">DB erreur: {diagnostics.dbError}</p>
             )}
-          </div>
-        )}
-
-        {diagnostics && !diagnostics.dbHasNewColumns && (
-          <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">
-            <p className="font-medium">⚠️ Migration base de données manquante</p>
-            <p className="mt-1">
-              Colonnes <code>url, mime_type, storage</code> manquantes dans table <code>media</code>. Appliquez <code>drizzle/0001_media_blob.sql</code> sur Neon :
-              <br />
-              <code className="mt-1 block rounded bg-black/30 p-2 font-mono text-[11px]">psql $DATABASE_URL -f drizzle/0001_media_blob.sql</code>
-            </p>
           </div>
         )}
 
@@ -244,7 +233,7 @@ export default function MediaClient() {
           className="hidden"
           onChange={(e) => e.target.files && uploadFiles(e.target.files)}
         />
-        <p className="text-xs text-faint">JPG · PNG · WEBP · SVG · GIF · AVIF — 8 Mo max · Plusieurs fichiers · Upload direct vers Vercel Blob</p>
+        <p className="text-xs text-faint">JPG · PNG · WEBP · SVG · GIF · AVIF — 8 Mo max · Plusieurs fichiers · Stockage en base PostgreSQL</p>
       </div>
 
       {/* Drag & drop zone */}
@@ -265,14 +254,14 @@ export default function MediaClient() {
           <div className="rounded-xl bg-night/30 p-14 text-center">
             <p className="text-sm text-faint">
               {items.length === 0
-                ? blobEnabled === false
-                  ? "Aucune image et stockage Blob non configuré — l'upload échouera en production sans BLOB_READ_WRITE_TOKEN."
-                  : "Aucune image importée. Glissez-déposez vos images ici ou cliquez sur Ajouter. Stockage persistant Vercel Blob."
+                ? storageReady === false
+                  ? "Aucune image et colonne media.data absente — appliquez la migration pour activer l'upload."
+                  : "Aucune image importée. Glissez-déposez vos images ici ou cliquez sur Ajouter. Les octets sont stockés en base PostgreSQL."
                 : "Aucun résultat pour cette recherche."}
             </p>
             {items.length === 0 && (
               <div className="mt-4 text-xs text-muted">
-                Compatible avec anciennes images <code>/images/…</code> — nouvelles images stockées en Blob CDN persistant après redeploy.
+                Compatible avec les images existantes <code>/images/…</code> — les nouvelles images sont servies par <code>/api/media/&lt;id&gt;</code>.
               </div>
             )}
           </div>
@@ -280,7 +269,7 @@ export default function MediaClient() {
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
             {filtered.map((m) => {
               const display = m.displayUrl || m.url || m.path;
-              const isBlob = display.startsWith("http");
+              const isDb = m.storage === "db";
               const usageList = usage[display] ?? usage[m.path] ?? usage[m.url ?? ""] ?? [];
               return (
                 <div key={m.id} className="group relative flex flex-col overflow-hidden rounded-xl border border-line bg-surface/60 transition-colors hover:border-gold/30">
@@ -297,8 +286,8 @@ export default function MediaClient() {
                       }}
                     />
                     <div className="absolute left-2 top-2 flex gap-1">
-                      <span className={`rounded-full px-2 py-0.5 text-[9px] tracking-wide uppercase backdrop-blur ${isBlob ? "bg-gold/90 text-night" : "bg-black/60 text-white/80"}`}>
-                        {m.storage === "blob" ? "Blob" : m.storage}
+                      <span className={`rounded-full px-2 py-0.5 text-[9px] tracking-wide uppercase backdrop-blur ${isDb ? "bg-gold/90 text-night" : "bg-black/60 text-white/80"}`}>
+                        {isDb ? "PostgreSQL" : m.storage}
                       </span>
                     </div>
                     {usageList.length > 0 && (
@@ -325,7 +314,9 @@ export default function MediaClient() {
                       {display}
                     </p>
                     <p className="mt-0.5 text-[10px] text-muted">
-                      {m.size ? `${(m.size / 1024).toFixed(0)} Ko` : ""} · {m.kind?.toUpperCase()} · {new Date(m.createdAt).toLocaleDateString("fr-FR")}
+                      {m.size ? `${(m.size / 1024).toFixed(0)} Ko` : ""}
+                      {m.width && m.height ? ` · ${m.width}×${m.height}` : ""} · {m.kind?.toUpperCase()} ·{" "}
+                      {new Date(m.createdAt).toLocaleDateString("fr-FR")}
                     </p>
                     {usageList.length > 0 && (
                       <p className="mt-1 line-clamp-2 text-[10px] leading-tight text-goldsoft" title={usageList.join(", ")}>
@@ -361,10 +352,11 @@ export default function MediaClient() {
       <div className="rounded-xl border border-line/50 bg-night/20 p-4 text-xs leading-relaxed text-muted">
         <p className="font-medium text-ink">Comment ça marche :</p>
         <ul className="mt-2 list-disc space-y-1 pl-5">
-          <li>Upload depuis n&apos;importe quel ordinateur → stockage Vercel Blob CDN persistant (survit aux redeploys).</li>
+          <li>Upload depuis n&apos;importe quel ordinateur → les octets sont écrits dans la colonne <code className="rounded bg-raised px-1">media.data</code> (bytea) de la base PostgreSQL.</li>
+          <li>Aucun stockage externe à provisionner : pas de token, pas de Blob Store, et rien n&apos;est écrit sur le disque du serveur.</li>
           <li>Anciennes images <code className="rounded bg-raised px-1">/images/…</code> et <code className="rounded bg-raised px-1">/media/…</code> restent compatibles.</li>
-          <li>Nouvelles images : URL <code className="rounded bg-raised px-1">https://…blob.vercel-storage.com/…</code> copiable et réutilisable dans Produits, Pages, Blog.</li>
-          <li>Suppression : supprime à la fois la ligne DB et le fichier Blob.</li>
+          <li>Nouvelles images : URL <code className="rounded bg-raised px-1">/api/media/&lt;id&gt;</code> copiable et réutilisable dans Produits, Pages, Blog.</li>
+          <li>Suppression : supprime la ligne, donc l&apos;image et ses octets.</li>
           <li>Recherche par nom, extension, URL.</li>
         </ul>
       </div>

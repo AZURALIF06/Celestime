@@ -1,5 +1,6 @@
 import {
   boolean,
+  customType,
   integer,
   jsonb,
   pgTable,
@@ -7,6 +8,14 @@ import {
   text,
   timestamp,
 } from "drizzle-orm/pg-core";
+
+/** Colonne `bytea` PostgreSQL : les octets des images de la médiathèque sont
+ *  stockés directement en base (aucun stockage objet externe requis). */
+export const bytea = customType<{ data: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+});
 
 // ---------------------------------------------------------------------------
 // E-commerce existant (configurateur + panier)
@@ -172,14 +181,21 @@ export const productVariants = pgTable("product_variants", {
 export const media = pgTable("media", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
-  path: text("path").notNull().unique(), // legacy: /media/... or /images/... ; now can hold blob URL for compat
-  url: text("url"), // Vercel Blob public URL (https://...)
+  // URL de lecture stable : /api/media/<id> pour les images en base,
+  // ou /images/… et /media/… pour les fichiers historiques du dépôt.
+  path: text("path").notNull().unique(),
+  // Historique : ancienne URL Vercel Blob des lignes créées avant le passage en base.
+  // Conservée en lecture seule pour ne casser aucune image déjà référencée.
+  url: text("url"),
   size: integer("size").notNull().default(0),
   kind: text("kind").notNull().default("image"),
   mimeType: text("mime_type"),
   width: integer("width"),
   height: integer("height"),
-  storage: text("storage").notNull().default("blob"), // blob | local | external
+  storage: text("storage").notNull().default("db"), // db | local | external | blob (historique)
+  // Octets de l'image. Nullable : absents pour les fichiers servis depuis /public
+  // et pour les lignes historiques.
+  data: bytea("data"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

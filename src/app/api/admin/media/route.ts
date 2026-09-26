@@ -1,124 +1,174 @@
-// Célestime — médiathèque : upload Vercel Blob persistant + fallback local dev
-// Compatible Vercel : pas de fs en prod, utilisation @vercel/blob
+// Célestime — médiathèque : les images sont stockées en PostgreSQL (bytea).
+// Aucun stockage objet externe : l'upload écrit directement dans media.data,
+// ce qui fonctionne aussi bien en local que sur un runtime au disque read-only.
 // Auth via guard()
 
 import { desc, eq } from "drizzle-orm";
-import { db } from "@/db";
+import { db, pool } from "@/db";
 import { media, pages, products } from "@/db/schema";
 import { audit } from "@/lib/auth";
 import { guard, jsonError } from "@/lib/admin-guard";
 import {
-  isBlobEnabled,
-  getBlobDiagnostics,
-  uploadToBlob,
-  deleteFromBlob,
-  uploadToLocal,
-  deleteFromLocal,
-  resolveMediaUrl,
+  ALLOWED_EXTENSIONS,
+  MEDIA_MIGRATION_FILE,
+  effectiveMimeType,
   getFileExtension,
   isAllowedExtension,
-} from "@/lib/blob";
+  mediaUrlFor,
+  probeDataColumn,
+  readImageSize,
+  resolveMediaUrl,
+  sanitizeName,
+  sniffMimeType,
+} from "@/lib/media";
 
 export const runtime = "nodejs";
-const OK = ["jpg", "jpeg", "png", "webp", "svg", "gif", "avif"];
+const OK = ALLOWED_EXTENSIONS;
 const MAX_SIZE = 8 * 1024 * 1024; // 8 Mo
+
+/** Projection de liste : jamais `data`, pour ne pas charger les octets inutilement. */
+const LIST_COLUMNS = {
+  id: media.id,
+  name: media.name,
+  path: media.path,
+  url: media.url,
+  size: media.size,
+  kind: media.kind,
+  mimeType: media.mimeType,
+  width: media.width,
+  height: media.height,
+  storage: media.storage,
+  createdAt: media.createdAt,
+};
+
+type MediaListItem = {
+  id: string;
+  name: string;
+  path: string;
+  url: string | null;
+  size: number;
+  kind: string;
+  mimeType: string | null;
+  width: number | null;
+  height: number | null;
+  storage: string;
+  createdAt: Date;
+};
+
+/** Repli si les colonnes ajoutées par les migrations manquent encore en base. */
+async function legacyList(): Promise<MediaListItem[]> {
+  const res = await pool.query(
+    `SELECT id, name, path, size, kind, created_at FROM media ORDER BY created_at DESC`
+  );
+  return res.rows.map((r: Record<string, unknown>) => ({
+    id: String(r.id),
+    name: String(r.name),
+    path: String(r.path),
+    url: null,
+    size: Number(r.size ?? 0),
+    kind: String(r.kind ?? "image"),
+    mimeType: null,
+    width: null,
+    height: null,
+    storage: "local",
+    createdAt: r.created_at as Date,
+  }));
+}
 
 export async function GET() {
   const g = await guard();
   if (g.denied) return g.denied;
 
-  let rows: any[] = [];
+  let rows: MediaListItem[] = [];
   let dbError: string | null = null;
-  let dbHasNewColumns = true;
 
   try {
-    rows = await db.select().from(media).orderBy(desc(media.createdAt));
-  } catch (e: any) {
-    dbError = e?.message ?? String(e);
-    console.warn("[media] select failed, fallback", e?.message);
-    // Si colonnes url/storage manquent encore en prod (migration non appliquée), fallback requête brute
-    if (dbError && (dbError.includes("column") || dbError.includes("does not exist") || dbError.includes("url") || dbError.includes("storage"))) {
-      dbHasNewColumns = false;
-    }
+    rows = await db
+      .select(LIST_COLUMNS)
+      .from(media)
+      .orderBy(desc(media.createdAt));
+  } catch (e) {
+    dbError = e instanceof Error ? e.message : String(e);
+    console.warn("[media] select failed, fallback legacy", dbError);
     try {
-      // @ts-ignore
-      const { pool } = await import("@/db");
-      const res = await pool.query(`SELECT id, name, path, size, kind, created_at FROM media ORDER BY created_at DESC`);
-      rows = res.rows.map((r: any) => ({
-        id: r.id,
-        name: r.name,
-        path: r.path,
-        url: r.path?.startsWith("http") ? r.path : null,
-        size: r.size,
-        kind: r.kind,
-        createdAt: r.created_at,
-        storage: r.path?.startsWith("http") ? "blob" : "local",
-        mimeType: null,
-      }));
-    } catch (e2: any) {
-      dbError = `${dbError} | fallback failed: ${e2?.message}`;
+      rows = await legacyList();
+      dbError = null;
+    } catch (e2) {
+      dbError = `${dbError} | fallback failed: ${e2 instanceof Error ? e2.message : String(e2)}`;
       rows = [];
     }
   }
 
+  const hasDataColumn = await probeDataColumn((sql) => pool.query(sql));
+
   // Où est utilisée chaque image (pages + produits)
-  let allPages: any[] = [];
-  let allProducts: any[] = [];
+  let allPages: { name: string; draft: unknown; published: unknown }[] = [];
+  let allProducts: { name: string; images: unknown }[] = [];
   try {
-    allPages = await db.select().from(pages);
-    allProducts = await db.select().from(products);
-  } catch {}
+    allPages = await db
+      .select({ name: pages.name, draft: pages.draft, published: pages.published })
+      .from(pages);
+    allProducts = await db.select({ name: products.name, images: products.images }).from(products);
+  } catch {
+    /* la détection d'usage est un confort, pas un bloquant */
+  }
 
   const usage: Record<string, string[]> = {};
+  const addUsage = (key: string | null | undefined, label: string) => {
+    if (!key) return;
+    const list = usage[key] ?? (usage[key] = []);
+    if (!list.includes(label)) list.push(label);
+  };
+
   for (const p of allPages) {
     const json = JSON.stringify([p.draft, p.published]).toLowerCase();
     for (const m of rows) {
-      const checkUrls = [m.path, m.url].filter(Boolean).map((u: string) => u.toLowerCase());
-      if (checkUrls.some((u) => json.includes(u))) {
-        const key = m.url ?? m.path;
-        (usage[key] ??= []).push(`Page ${p.name}`);
-        if (m.path !== key) (usage[m.path] ??= []).push(`Page ${p.name}`);
+      const needles = [m.path, m.url].filter(Boolean).map((u) => u!.toLowerCase());
+      if (needles.some((u) => json.includes(u))) {
+        addUsage(m.path, `Page ${p.name}`);
+        addUsage(m.url, `Page ${p.name}`);
       }
     }
   }
   for (const p of allProducts) {
-    const imgs = (p.images as unknown as string[] | null) ?? [];
+    const imgs = (p.images as string[] | null) ?? [];
     for (const m of rows) {
-      const urls = [m.path, m.url].filter(Boolean);
-      for (const u of urls) {
-        if (imgs.includes(u) || imgs.includes(m.path)) {
-          (usage[u] ??= []).push(`Produit ${p.name}`);
-          if (m.path) (usage[m.path] ??= []).push(`Produit ${p.name}`);
-        }
+      const candidates = [m.path, m.url].filter(Boolean) as string[];
+      if (candidates.some((u) => imgs.includes(u))) {
+        addUsage(m.path, `Produit ${p.name}`);
+        addUsage(m.url, `Produit ${p.name}`);
       }
     }
   }
 
-  // Normalise les lignes pour le front
   const items = rows.map((r) => ({
     id: r.id,
     name: r.name,
     path: r.path,
-    url: r.url ?? (r.path?.startsWith("http") ? r.path : null),
+    url: r.url ?? null,
     displayUrl: resolveMediaUrl(r),
     size: r.size,
     kind: r.kind,
-    mimeType: r.mimeType ?? r.mime_type ?? null,
-    storage: r.storage ?? (r.path?.startsWith("http") ? "blob" : "local"),
-    createdAt: r.createdAt ?? r.created_at,
+    mimeType: r.mimeType,
+    width: r.width,
+    height: r.height,
+    storage: r.storage ?? "db",
+    createdAt: r.createdAt,
   }));
-
-  const diag = getBlobDiagnostics();
 
   return Response.json({
     items,
     usage,
-    blobEnabled: isBlobEnabled(),
+    // Le stockage est toujours la base : plus de token à provisionner.
+    storage: "postgresql",
+    dbStorageReady: hasDataColumn,
     diagnostics: {
-      ...diag,
-      dbHasNewColumns,
+      storage: "postgresql",
+      hasDataColumn,
+      dbOk: dbError === null,
       dbError,
       mediaCount: items.length,
+      pendingMigration: hasDataColumn ? null : MEDIA_MIGRATION_FILE,
     },
   });
 }
@@ -130,7 +180,7 @@ export async function POST(req: Request) {
   const ctype = req.headers.get("content-type") ?? "";
 
   if (ctype.includes("application/json")) {
-    let j: any;
+    let j: { action?: string; id?: string; name?: string };
     try {
       j = await req.json();
     } catch {
@@ -141,74 +191,53 @@ export async function POST(req: Request) {
       if (!j.id || !j.name) return jsonError("Nom requis.");
       try {
         await db.update(media).set({ name: String(j.name).slice(0, 200) }).where(eq(media.id, j.id));
-      } catch (e: any) {
-        // fallback si colonne manquante
-        if (e?.message?.includes("column")) {
-          // @ts-ignore
-          const { pool } = await import("@/db");
-          await pool.query(`UPDATE media SET name=$1 WHERE id=$2`, [String(j.name).slice(0, 200), j.id]);
-        } else {
-          return jsonError(`Erreur DB renommage: ${e?.message ?? e}`);
-        }
+        await audit(g.email!, "media.rename", j.id);
+      } catch (e) {
+        return jsonError(`Erreur DB renommage: ${e instanceof Error ? e.message : String(e)}`);
       }
       return Response.json({ ok: true });
     }
 
     if (j?.action === "delete") {
       if (!j.id) return jsonError("ID requis.");
-      let row: any = null;
       try {
-        const all = await db.select().from(media);
-        row = all.find((m: any) => m.id === j.id);
-      } catch {
-        try {
-          const { pool } = await import("@/db");
-          const res = await pool.query(`SELECT * FROM media WHERE id=$1`, [j.id]);
-          row = res.rows[0];
-        } catch {}
-      }
-
-      if (row) {
-        const urlToDelete = row.url ?? row.path;
-        if (urlToDelete?.startsWith("http")) {
-          await deleteFromBlob(urlToDelete);
-        } else {
-          await deleteFromLocal(row.path);
-        }
-      }
-
-      try {
+        // Les octets vivent dans la ligne : supprimer la ligne suffit.
         await db.delete(media).where(eq(media.id, j.id));
-      } catch (e: any) {
-        if (e?.message?.includes("column") || e?.message?.includes("does not exist")) {
-          const { pool } = await import("@/db");
-          await pool.query(`DELETE FROM media WHERE id=$1`, [j.id]);
-        } else {
-          return jsonError(`Erreur DB suppression: ${e?.message ?? e}`);
-        }
+      } catch (e) {
+        return jsonError(`Erreur DB suppression: ${e instanceof Error ? e.message : String(e)}`);
       }
-
       await audit(g.email!, "media.delete", j.id);
       return Response.json({ ok: true });
     }
 
     if (j?.action === "check") {
-      // Endpoint diagnostic pour admin
-      const diag = getBlobDiagnostics();
-      let dbCheck: any = { ok: true };
+      const hasDataColumn = await probeDataColumn((sql) => pool.query(sql));
+      let dbCheck: { ok: boolean; error?: string; count?: number; hasDataColumn: boolean };
       try {
-        const test = await db.select().from(media).limit(1);
-        dbCheck = { ok: true, hasNewColumns: true, count: test.length };
-      } catch (e: any) {
-        dbCheck = { ok: false, error: e?.message, hasNewColumns: false };
+        const test = await db.select({ id: media.id }).from(media).limit(1);
+        dbCheck = { ok: true, count: test.length, hasDataColumn };
+      } catch (e) {
+        dbCheck = { ok: false, error: e instanceof Error ? e.message : String(e), hasDataColumn };
       }
-      return Response.json({ blob: diag, db: dbCheck });
+      return Response.json({
+        storage: "postgresql",
+        db: dbCheck,
+        pendingMigration: hasDataColumn ? null : MEDIA_MIGRATION_FILE,
+      });
     }
 
     return jsonError("Action inconnue.");
   }
 
   // Upload multipart/form-data (un ou plusieurs fichiers)
+  const hasDataColumn = await probeDataColumn((sql) => pool.query(sql));
+  if (!hasDataColumn) {
+    return jsonError(
+      `Upload impossible : la colonne "media.data" est absente de la base. Appliquez ${MEDIA_MIGRATION_FILE} puis réessayez.`,
+      503
+    );
+  }
+
   const form = await req.formData().catch(() => null);
   if (!form) return jsonError("Formulaire invalide.");
 
@@ -218,147 +247,77 @@ export async function POST(req: Request) {
 
   if (list.length === 0) return jsonError("Fichier requis (JPG, PNG, WEBP, SVG, GIF, AVIF).");
 
-  const uploaded: any[] = [];
-  const blobEnabled = isBlobEnabled();
-  const isProd = Boolean(process.env.VERCEL) || process.env.NODE_ENV === "production";
-
-  // En production, on exige Blob
-  if (isProd && !blobEnabled) {
-    return jsonError(
-      "Upload impossible : BLOB_READ_WRITE_TOKEN absent. En production Vercel, le stockage local est en lecture seule. Créez un Blob Store dans Vercel Dashboard > Storage > Blob Store > Create Store > Connect to project Celestime, puis redeployez. Voir https://vercel.com/docs/storage/vercel-blob"
-    );
-  }
+  const uploaded: Record<string, unknown>[] = [];
 
   for (const file of list) {
-    if (typeof (file as any).arrayBuffer !== "function") continue;
+    if (typeof file.arrayBuffer !== "function") continue;
+
     const ext = getFileExtension(file.name);
-    if (!OK.includes(ext) || !isAllowedExtension(ext)) {
+    if (!isAllowedExtension(ext) || !OK.includes(ext)) {
       return jsonError(`Format .${ext} non supporté. Autorisés : ${OK.join(", ")}`);
     }
-    if (file.size > MAX_SIZE) return jsonError(`Fichier trop volumineux (${(file.size / 1024 / 1024).toFixed(1)} Mo) — 8 Mo max.`);
-    // validation mime basique
-    if (file.type && !file.type.startsWith("image/") && file.type !== "image/svg+xml") {
-      return jsonError("Le fichier doit être une image.");
+    if (file.size > MAX_SIZE) {
+      return jsonError(`Fichier trop volumineux (${(file.size / 1024 / 1024).toFixed(1)} Mo) — 8 Mo max.`);
     }
-
     const id = crypto.randomUUID();
-    const baseName = file.name.replace(/\.[^.]+$/, "").slice(0, 120) || "image";
+    const baseName =
+      sanitizeName(file.name.replace(/\.[^.]+$/, "")).replace(/-+$/g, "").slice(0, 120) || "image";
+    const path = mediaUrlFor(id);
 
     try {
-      if (blobEnabled) {
-        const { url } = await uploadToBlob(file, id);
-        // Insertion DB avec url + path = url pour compat
-        const rowData: any = {
+      const data = Buffer.from(await file.arrayBuffer());
+
+      // Contrôle sur les octets réels, pas sur le type déclaré : certains clients
+      // annoncent application/octet-stream pour un .webp parfaitement valide.
+      if (!sniffMimeType(data) && !(file.type || "").startsWith("image/")) {
+        return jsonError("Le contenu du fichier n'est pas une image reconnue.");
+      }
+      if (data.length > MAX_SIZE) {
+        return jsonError(`Fichier trop volumineux (${(data.length / 1024 / 1024).toFixed(1)} Mo) — 8 Mo max.`);
+      }
+
+      const size = readImageSize(data);
+
+      const [row] = await db
+        .insert(media)
+        .values({
           id,
           name: baseName,
-          path: url, // compat : path contient l'URL complète
-          url,
-          size: file.size,
+          path,
+          url: null,
+          size: data.length,
           kind: ext,
-          mimeType: (file as any).type || null,
-          storage: "blob",
-        };
-        try {
-          const [row] = await db.insert(media).values(rowData).returning();
-          uploaded.push({
-            id: row.id,
-            name: row.name,
-            path: row.path,
-            url: (row as any).url ?? url,
-            displayUrl: url,
-            size: row.size,
-            kind: row.kind,
-            storage: "blob",
-            createdAt: row.createdAt,
-          });
-        } catch (e: any) {
-          // fallback si colonnes manquantes (migration non appliquée)
-          if (e?.message?.includes("column") || e?.message?.includes("does not exist")) {
-            try {
-              const { pool } = await import("@/db");
-              await pool.query(
-                `INSERT INTO media (id, name, path, size, kind) VALUES ($1,$2,$3,$4,$5)`,
-                [id, baseName, url, file.size, ext]
-              );
-              uploaded.push({
-                id,
-                name: baseName,
-                path: url,
-                url,
-                displayUrl: url,
-                size: file.size,
-                kind: ext,
-                storage: "blob",
-                createdAt: new Date().toISOString(),
-              });
-            } catch (e2: any) {
-              return jsonError(`Upload Blob OK mais insertion DB échouée (migration manquante ?): ${e2?.message ?? e2}. URL Blob: ${url}`);
-            }
-          } else {
-            return jsonError(`Insertion DB échouée: ${e?.message ?? e}. URL Blob créée: ${url} mais non enregistrée.`);
-          }
-        }
-        await audit(g.email!, "media.upload.blob", url);
-      } else {
-        // fallback local dev uniquement (non prod)
-        try {
-          const { url, path: publicPath } = await uploadToLocal(file, id);
-          const rowData: any = {
-            id,
-            name: baseName,
-            path: publicPath,
-            url: null,
-            size: file.size,
-            kind: ext,
-            mimeType: (file as any).type || null,
-            storage: "local",
-          };
-          try {
-            const [row] = await db.insert(media).values(rowData).returning();
-            uploaded.push({
-              id: row.id,
-              name: row.name,
-              path: row.path,
-              url: (row as any).url ?? null,
-              displayUrl: publicPath,
-              size: row.size,
-              kind: row.kind,
-              storage: "local",
-              createdAt: row.createdAt,
-            });
-          } catch (e: any) {
-            if (e?.message?.includes("column")) {
-              const { pool } = await import("@/db");
-              await pool.query(`INSERT INTO media (id, name, path, size, kind) VALUES ($1,$2,$3,$4,$5)`, [
-                id,
-                baseName,
-                publicPath,
-                file.size,
-                ext,
-              ]);
-              uploaded.push({
-                id,
-                name: baseName,
-                path: publicPath,
-                url: null,
-                displayUrl: publicPath,
-                size: file.size,
-                kind: ext,
-                storage: "local",
-                createdAt: new Date().toISOString(),
-              });
-            } else throw e;
-          }
-          await audit(g.email!, "media.upload.local", publicPath);
-        } catch (e: any) {
-          return jsonError(`Upload local échoué (normal en prod Vercel sans Blob): ${e?.message ?? e}`);
-        }
-      }
-    } catch (err: any) {
-      console.error("[media upload] failed", err);
-      return jsonError(`Échec upload ${file.name} : ${err?.message ?? "erreur inconnue"}`);
+          // MIME lu dans les octets : plusieurs visuels .jpg sont en réalité des PNG.
+          mimeType: effectiveMimeType(data, ext, file.type),
+          width: size?.width ?? null,
+          height: size?.height ?? null,
+          storage: "db",
+          data,
+        })
+        .returning();
+
+      uploaded.push({
+        id: row.id,
+        name: row.name,
+        path: row.path,
+        url: null,
+        displayUrl: row.path,
+        size: row.size,
+        kind: row.kind,
+        mimeType: row.mimeType,
+        width: row.width,
+        height: row.height,
+        storage: row.storage,
+        createdAt: row.createdAt,
+      });
+
+      await audit(g.email!, "media.upload.db", row.path);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[media upload] failed", msg);
+      return jsonError(`Échec upload ${file.name} : ${msg}`);
     }
   }
 
-  return Response.json({ items: uploaded, ok: true, blobEnabled }, { status: 201 });
+  return Response.json({ items: uploaded, ok: true, storage: "postgresql" }, { status: 201 });
 }
