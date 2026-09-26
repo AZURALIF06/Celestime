@@ -3,8 +3,15 @@ import { db } from "@/db";
 import { products, productVariants } from "@/db/schema";
 import { audit } from "@/lib/auth";
 import { guard, jsonError } from "@/lib/admin-guard";
+import { productImageForSlug } from "@/lib/catalog";
 
 export const runtime = "nodejs";
+
+/** Nettoie une liste d'images : ne garde que des URLs non vides. */
+function cleanImages(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((u): u is string => typeof u === "string" && u.trim() !== "");
+}
 
 export async function GET() {
   const g = await guard();
@@ -43,6 +50,10 @@ export async function POST(req: Request) {
     const taken = (await db.select().from(products).where(eq(products.slug, slug)))[0];
     if (taken) return jsonError("Cette URL (slug) est déjà utilisée.");
     const id = crypto.randomUUID();
+    // Sans image fournie, on reprend l'image d'origine du catalogue pour ce slug :
+    // sinon tous les produits sans image tombaient sur la même image par défaut.
+    const requestedImages = cleanImages(body.images);
+    const slugImage = productImageForSlug(slug);
     await db.insert(products).values({
       id,
       slug,
@@ -57,7 +68,7 @@ export async function POST(req: Request) {
       taxRate: Number(body.taxRate) || 2000,
       oldPrice: body.oldPrice ? Math.round(Number(body.oldPrice) * 100) : null,
       onPromo: Boolean(body.onPromo),
-      images: Array.isArray(body.images) ? body.images : [],
+      images: requestedImages.length > 0 ? requestedImages : slugImage ? [slugImage] : [],
       status: body.status || "draft",
       kind: body.kind || "static",
       engine: body.engine ?? null,

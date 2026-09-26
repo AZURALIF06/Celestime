@@ -21,6 +21,21 @@ export interface DbProduct extends Omit<ProductDef, "kind"> {
   engine?: Record<string, unknown> | null;
 }
 
+/** Image d'origine d'un produit, résolue depuis son slug.
+ *  Chaque produit du catalogue Célestime a sa propre visuel : on ne renvoie donc
+ *  jamais une image unique par défaut, ce qui faisait apparaître la même image
+ *  (naissance) pour tous les produits sans image enregistrée. */
+export function productImageForSlug(slug: string): string | null {
+  return STATIC_PRODUCTS.find((p) => p.slug === slug)?.image ?? null;
+}
+
+/** Image principale d'un produit : image enregistrée en base, sinon image d'origine
+ *  du catalogue correspondant au slug, sinon visuel générique. */
+export function productImageOf(row: { slug: string; images: unknown }): string {
+  const stored = (row.images as unknown as string[] | null)?.find(Boolean);
+  return stored || productImageForSlug(row.slug) || "/images/naissance.jpg";
+}
+
 function rowToProduct(row: typeof products.$inferSelect): DbProduct {
   const engine = (row.engine ?? {}) as Record<string, unknown>;
   const fallback = STATIC_PRODUCTS.find((p) => p.slug === row.slug);
@@ -34,7 +49,7 @@ function rowToProduct(row: typeof products.$inferSelect): DbProduct {
     kind: row.kind || "static",
     occasion: ((engine.occasion as ProductDef["occasion"] | undefined)) ?? "souvenir",
     priceFrom: row.oldPrice ?? (engine.priceFrom as number | undefined) ?? 0,
-    image: ((row.images as unknown as string[])?.[0]) ?? "/images/naissance.jpg",
+    image: productImageOf(row),
     prices: (engine.prices as ProductDef["prices"]) ?? fallback?.prices ?? { base: {}, frame: {} },
     sizes: (engine.sizes as ProductDef["sizes"] | undefined) ?? fallback?.sizes ?? [],
     shapes: (engine.shapes as ProductDef["shapes"] | undefined) ?? fallback?.shapes ?? [],
