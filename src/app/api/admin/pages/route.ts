@@ -4,6 +4,7 @@ import { pageTemplates, pageVersions, pages } from "@/db/schema";
 import { guard, jsonError } from "@/lib/admin-guard";
 import { audit } from "@/lib/auth";
 import { emptyPage, type CmsPage } from "@/lib/cms";
+import { createBoutiqueCmsPage, hasBoutiqueProductBlocks } from "@/lib/boutique-cms";
 import { createFaqCmsPage } from "@/lib/faq-cms";
 
 export const runtime = "nodejs";
@@ -68,6 +69,27 @@ export async function POST(req: Request) {
       await audit(g.email!, "page.connect_faq", "faq");
       return Response.json({ id, slug: "faq", existing: false }, { status: 201 });
     }
+    case "connectBoutique": {
+      const existing = (await db.select().from(pages).where(eq(pages.slug, "boutique")))[0];
+      if (existing) return Response.json({ id: existing.id, slug: existing.slug, existing: true });
+
+      const id = crypto.randomUUID();
+      await db.insert(pages).values({
+        id,
+        slug: "boutique",
+        name: "Boutique",
+        status: "draft",
+        draft: createBoutiqueCmsPage(),
+        published: null,
+        seo: {
+          title: "Boutique",
+          description: "Éléments éditoriaux de la boutique Célestime.",
+          noindex: true,
+        },
+      });
+      await audit(g.email!, "page.connect_boutique", "boutique");
+      return Response.json({ id, slug: "boutique", existing: false }, { status: 201 });
+    }
     case "create": {
       if (!body.name || typeof body.name !== "string") return jsonError("Le nom de la page est requis.");
       let slug = slugify(body.slug || body.name);
@@ -93,6 +115,12 @@ export async function POST(req: Request) {
     case "update": {
       const row = (await db.select().from(pages).where(eq(pages.id, body.id)))[0];
       if (!row) return jsonError("Page introuvable.", 404);
+      if (row.slug === "boutique") {
+        if (body.slug && slugify(body.slug) !== "boutique") return jsonError("L’URL de la page Boutique est réservée.");
+        if (hasBoutiqueProductBlocks(body.data ?? row.draft)) {
+          return jsonError("Le catalogue produit reste applicatif et ne peut pas être enregistré dans le CMS Boutique.");
+        }
+      }
       const patch: any = { updatedAt: new Date() };
       if (body.data) patch.draft = body.data;
       if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim();
@@ -144,6 +172,10 @@ export async function POST(req: Request) {
     case "restore": {
       const v = (await db.select().from(pageVersions).where(eq(pageVersions.id, body.versionId)))[0];
       if (!v) return jsonError("Version introuvable.", 404);
+      const owner = (await db.select().from(pages).where(eq(pages.id, v.pageId)))[0];
+      if (owner?.slug === "boutique" && hasBoutiqueProductBlocks(v.data)) {
+        return jsonError("Cette version contient des blocs catalogue interdits sur la page Boutique.");
+      }
       await db.update(pages).set({ draft: v.data, updatedAt: new Date() }).where(eq(pages.id, v.pageId));
       await audit(g.email!, "page.restore", String(v.pageId));
       return Response.json({ ok: true, data: v.data });

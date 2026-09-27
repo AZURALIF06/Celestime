@@ -189,6 +189,7 @@ export default function PageEditor({
   const selEl = sel && selSection ? selSection.elements.find((e) => e.id === sel.elId) : null;
 
   const addElement = (type: string, sectionId?: string, x?: number, y?: number) => {
+    if (initialSlug === "boutique" && (type === "product" || type === "productGrid")) return;
     const item = LIBRARY.find((l) => l.type === type && l.label.length > 0) ?? LIBRARY.find((l) => l.type === type)!;
     const item2 = LIBRARY.find((l) => l.label === item.label && l.type === type) ?? item;
     void item2;
@@ -366,6 +367,7 @@ export default function PageEditor({
 
   const hasUnpublishedChanges = status === "published" && publishedSnapshot !== JSON.stringify(page);
   const vpw = DEVICE_WIDTH[device];
+  const editorLibrary = initialSlug === "boutique" ? LIBRARY.filter((item) => item.type !== "product" && item.type !== "productGrid") : LIBRARY;
 
   return (
     <div className="flex h-screen flex-col bg-night text-ink">
@@ -379,10 +381,10 @@ export default function PageEditor({
           aria-label="Nom de la page"
         />
         <label className="flex items-center gap-1 text-xs text-faint">
-          {initialSlug === "faq" ? "/" : "/p/"}
+          {initialSlug === "faq" || initialSlug === "boutique" ? "/" : "/p/"}
           <input
             value={slug}
-            readOnly={initialSlug === "faq"}
+            readOnly={initialSlug === "faq" || initialSlug === "boutique"}
             onChange={(e) => setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-"))}
             className="w-36 rounded-lg border border-line bg-night px-3 py-1.5 text-xs focus:border-gold read-only:opacity-70"
             aria-label="URL de la page"
@@ -412,7 +414,7 @@ export default function PageEditor({
           <span className={`rounded-full px-3 py-1 text-[11px] uppercase tracking-wide ${status === "published" ? "bg-gold/15 text-gold" : "bg-raised text-faint"}`}>
             {status === "published" ? "Publiée" : "Brouillon"}{dirty ? " •" : ""}
           </span>
-          <Link href={slug === "faq" ? "/faq" : `/p/${slug}`} target="_blank" className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:text-ink">
+          <Link href={slug === "faq" || slug === "boutique" ? `/${slug}` : `/p/${slug}`} target="_blank" className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:text-ink">
             Voir le site
           </Link>
           <button onClick={previewDraft} disabled={saving} className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50">
@@ -471,7 +473,7 @@ export default function PageEditor({
         {/* Bibliothèque */}
         <aside className="w-52 shrink-0 overflow-y-auto border-r border-line bg-surface/60 p-3">
           <p className="mb-2 text-[10px] tracking-[0.2em] text-faint uppercase">Bibliothèque</p>
-          {Object.entries(LIBRARY.reduce<Record<string, typeof LIBRARY>>((acc, l) => ((acc[l.category] ??= []).push(l), acc), {})).map(([cat, items]) => (
+          {Object.entries(editorLibrary.reduce<Record<string, typeof LIBRARY>>((acc, l) => ((acc[l.category] ??= []).push(l), acc), {})).map(([cat, items]) => (
             <div key={cat} className="mb-3">
               <p className="mb-1.5 text-[10px] tracking-[0.16em] text-gold uppercase">{cat}</p>
               <div className="flex flex-wrap gap-1.5">
@@ -501,7 +503,7 @@ export default function PageEditor({
             {page.sections.map((s, si) => (
               <div key={s.id} className="group/sec relative mb-3">
                 <div className="absolute -top-7 left-0 z-20 flex items-center gap-1 opacity-0 transition-opacity group-hover/sec:opacity-100">
-                  <span className="rounded bg-raised px-2 py-0.5 text-[10px] text-faint">Section {si + 1}</span>
+                  <span className="rounded bg-raised px-2 py-0.5 text-[10px] text-faint">{initialSlug === "boutique" ? si === 0 ? "Éditorial avant les produits" : `Éditorial après les produits · ${si}` : `Section ${si + 1}`}</span>
                   <button onClick={() => moveSection(s.id, -1)} className="rounded bg-raised px-1.5 text-[11px] text-muted hover:text-ink" title="Monter">↑</button>
                   <button onClick={() => moveSection(s.id, 1)} className="rounded bg-raised px-1.5 text-[11px] text-muted hover:text-ink" title="Descendre">↓</button>
                   <button onClick={() => duplicateSection(s.id)} className="rounded bg-raised px-1.5 text-[11px] text-muted hover:text-ink" title="Dupliquer">⧉</button>
@@ -583,6 +585,11 @@ export default function PageEditor({
                       })}
                   </div>
                 </div>
+                {initialSlug === "boutique" && si === 0 && (
+                  <div className="my-4 rounded-xl border border-dashed border-gold/40 bg-gold/5 px-4 py-3 text-center text-xs text-goldsoft">
+                    Catalogue produits dynamique — affiché par le site, non stocké et non modifiable dans le CMS.
+                  </div>
+                )}
               </div>
             ))}
           </div>

@@ -38,6 +38,7 @@ export default function SiteMapClient(initial: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [connectingFaq, setConnectingFaq] = useState(false);
+  const [connectingBoutique, setConnectingBoutique] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const entries = useMemo(() => {
@@ -51,6 +52,7 @@ export default function SiteMapClient(initial: Props) {
       let href: string | null = isAdmin ? route.path : !dynamic ? route.path : null;
       let action = isAdmin ? "Ouvrir" : !dynamic ? "Voir la page" : null;
       let connectFaq = false;
+      let connectBoutique = false;
       let media = route.media;
 
       if (route.path === "/faq") {
@@ -67,6 +69,21 @@ export default function SiteMapClient(initial: Props) {
           href = null;
           action = null;
           connectFaq = true;
+        }
+      } else if (route.path === "/boutique") {
+        const boutiquePage = inspection.cmsPages.find((page) => page.slug === "boutique");
+        if (boutiquePage) {
+          type = "Page CMS hybride";
+          status = boutiquePage.status === "published" ? "Éditorial publié · catalogue dynamique" : "Brouillon — catalogue actuel conservé";
+          href = boutiquePage.editHref;
+          action = "Éditer l’éditorial";
+          media = boutiquePage.media;
+        } else {
+          type = "Page hybride";
+          status = "Code actuel — catalogue dynamique";
+          href = null;
+          action = null;
+          connectBoutique = true;
         }
       }
 
@@ -99,11 +116,12 @@ export default function SiteMapClient(initial: Props) {
         media,
         admin: isAdmin,
         connectFaq,
+        connectBoutique,
       };
     });
 
     const cmsEntries = [
-      ...inspection.cmsPages.filter((page) => page.slug !== "faq").map((page) => ({
+      ...inspection.cmsPages.filter((page) => page.slug !== "faq" && page.slug !== "boutique").map((page) => ({
         key: `cms:${page.id}`,
         path: page.path,
         name: page.name,
@@ -115,6 +133,7 @@ export default function SiteMapClient(initial: Props) {
         media: page.media,
         admin: false,
         connectFaq: false,
+        connectBoutique: false,
       })),
       ...inspection.blogPosts.map((post) => ({
         key: `blog:${post.id}`,
@@ -128,6 +147,7 @@ export default function SiteMapClient(initial: Props) {
         media: post.media,
         admin: false,
         connectFaq: false,
+        connectBoutique: false,
       })),
     ];
 
@@ -155,6 +175,25 @@ export default function SiteMapClient(initial: Props) {
     }
   }
 
+  async function connectBoutique() {
+    setConnectingBoutique(true);
+    setActionError(null);
+    try {
+      const response = await fetch("/api/admin/pages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "connectBoutique" }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.id) throw new Error(data.error ?? "La connexion de la boutique au CMS a échoué.");
+      router.push(`/admin/editor/${data.id}`);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Erreur lors de la connexion de la boutique.");
+    } finally {
+      setConnectingBoutique(false);
+    }
+  }
+
   async function refresh() {
     setRefreshing(true);
     setRefreshError(null);
@@ -170,8 +209,10 @@ export default function SiteMapClient(initial: Props) {
     }
   }
 
-  const publicPages = inspection.routes.filter((route) => route.kind !== "admin").length + inspection.cmsPages.length + inspection.blogPosts.length;
-  const hardcodedPages = inspection.routes.filter((route) => route.kind === "static" && !route.path.startsWith("/blog")).length;
+  const routePaths = new Set(inspection.routes.filter((route) => route.kind !== "admin").map((route) => route.path));
+  const cmsPaths = new Set(inspection.cmsPages.map((page) => page.path));
+  const publicPages = routePaths.size + inspection.cmsPages.filter((page) => !routePaths.has(page.path)).length + inspection.blogPosts.length;
+  const hardcodedPages = inspection.routes.filter((route) => route.kind === "static" && !route.path.startsWith("/blog") && !cmsPaths.has(route.path)).length;
   const dynamicRoutes = inspection.routes.filter((route) => route.kind === "dynamic").length;
 
   return (
@@ -239,6 +280,10 @@ export default function SiteMapClient(initial: Props) {
                     {entry.connectFaq ? (
                       <button onClick={connectFaq} disabled={connectingFaq} className="rounded-full bg-gold px-3 py-1.5 text-[11px] text-night hover:bg-goldsoft disabled:opacity-50">
                         {connectingFaq ? "Connexion…" : "Connecter au CMS"}
+                      </button>
+                    ) : entry.connectBoutique ? (
+                      <button onClick={connectBoutique} disabled={connectingBoutique} className="rounded-full bg-gold px-3 py-1.5 text-[11px] text-night hover:bg-goldsoft disabled:opacity-50">
+                        {connectingBoutique ? "Connexion…" : "Connecter l’éditorial"}
                       </button>
                     ) : entry.href && entry.action ? (
                       <Link href={entry.href} target={entry.action === "Voir la page" ? "_blank" : undefined} rel={entry.action === "Voir la page" ? "noreferrer" : undefined} className="inline-block rounded-full border border-line px-3 py-1.5 text-[11px] text-ink hover:border-gold hover:text-gold">
