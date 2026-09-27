@@ -1,0 +1,269 @@
+{
+  "generatedAt": "2026-09-27T16:18:35.683Z",
+  "routes": [
+    {
+      "path": "/",
+      "file": "src/app/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": [
+        "/images/naissance.jpg"
+      ]
+    },
+    {
+      "path": "/account",
+      "file": "src/app/account/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/admin/blog",
+      "file": "src/app/admin/blog/page.tsx",
+      "kind": "admin",
+      "sourceType": "administration",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/admin/commerce",
+      "file": "src/app/admin/commerce/page.tsx",
+      "kind": "admin",
+      "sourceType": "administration",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/admin/dashboard",
+      "file": "src/app/admin/dashboard/page.tsx",
+      "kind": "admin",
+      "sourceType": "administration",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/admin/editeur",
+      "file": "src/app/admin/editeur/page.tsx",
+      "kind": "admin",
+      "sourceType": "administration",
+      "lastModified": "2026-09-27T16:18:35.683Z",
+      "media": []
+    },
+    {
+      "path": "/admin/editor/[id]",
+      "file": "src/app/admin/editor/[id]/page.tsx",
+      "kind": "admin",
+      "sourceType": "administration",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/admin/login",
+      "file": "src/app/admin/login/page.tsx",
+      "kind": "admin",
+      "sourceType": "administration",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/admin/media",
+      "file": "src/app/admin/media/page.tsx",
+      "kind": "admin",
+      "sourceType": "administration",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/admin/orders",
+      "file": "src/app/admin/orders/page.tsx",
+      "kind": "admin",
+      "sourceType": "administration",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/admin/pages",
+      "file": "src/app/admin/pages/page.tsx",
+      "kind": "admin",
+      "sourceType": "administration",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/admin/products",
+      "file": "src/app/admin/products/page.tsx",
+      "kind": "admin",
+      "sourceType": "administration",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/admin/settings",
+      "file": "src/app/admin/settings/page.tsx",
+      "kind": "admin",
+      "sourceType": "administration",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/blog",
+      "file": "src/app/blog/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/blog/[slug]",
+      "file": "src/app/blog/[slug]/page.tsx",
+      "kind": "dynamic",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/boutique",
+      "file": "src/app/boutique/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/cart",
+      "file": "src/app/cart/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/cgv",
+      "file": "src/app/cgv/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/checkout",
+      "file": "src/app/checkout/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/comment-ca-marche",
+      "file": "src/app/comment-ca-marche/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/confidentialite",
+      "file": "src/app/confidentialite/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/confirmation/[orderNumber]",
+      "file": "src/app/confirmation/[orderNumber]/page.tsx",
+      "kind": "dynamic",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/contact",
+      "file": "src/app/contact/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/create",
+      "file": "src/app/create/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/faq",
+      "file": "src/app/faq/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/livraison",
+      "file": "src/app/livraison/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/mentions-legales",
+      "file": "src/app/mentions-legales/page.tsx",
+      "kind": "static",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/p/[slug]",
+      "file": "src/app/p/[slug]/page.tsx",
+      "kind": "dynamic",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    },
+    {
+      "path": "/produit/[slug]",
+      "file": "src/app/produit/[slug]/page.tsx",
+      "kind": "dynamic",
+      "sourceType": "code",
+      "lastModified": "2026-09-27T14:35:20+02:00",
+      "media": []
+    }
+  ],
+  "sharedMedia": [
+    {
+      "url": "/images/naissance.jpg",
+      "source": "src/lib/options.ts"
+    },
+    {
+      "url": "/images/nous-deux.jpg",
+      "source": "src/lib/options.ts"
+    },
+    {
+      "url": "/images/rencontre.jpg",
+      "source": "src/lib/options.ts"
+    },
+    {
+      "url": "/images/journee.jpg",
+      "source": "src/lib/options.ts"
+    },
+    {
+      "url": "/images/calendrier.jpg",
+      "source": "src/lib/options.ts"
+    },
+    {
+      "url": "/images/carnet.jpg",
+      "source": "src/lib/options.ts"
+    },
+    {
+      "url": "/images/poemes.jpg",
+      "source": "src/lib/options.ts"
+    }
+  ]
+}
