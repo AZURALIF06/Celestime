@@ -10,11 +10,15 @@ import { audit } from "@/lib/auth";
 import { guard, jsonError } from "@/lib/admin-guard";
 import {
   ALLOWED_EXTENSIONS,
+  MEDIA_MAX_SIZE,
+  MEDIA_MAX_SIZE_LABEL,
   MEDIA_MIGRATION_FILE,
   effectiveMimeType,
   getFileExtension,
   isAllowedExtension,
+  isMissingSchemaError,
   mediaUrlFor,
+  pgErrorCode,
   probeDataColumn,
   readImageSize,
   resolveMediaUrl,
@@ -24,7 +28,7 @@ import {
 
 export const runtime = "nodejs";
 const OK = ALLOWED_EXTENSIONS;
-const MAX_SIZE = 8 * 1024 * 1024; // 8 Mo
+const MAX_SIZE = MEDIA_MAX_SIZE; // 4 Mo — voir MEDIA_MAX_SIZE dans @/lib/media
 
 /** Projection de liste : jamais `data`, pour ne pas charger les octets inutilement. */
 const LIST_COLUMNS = {
@@ -88,7 +92,8 @@ export async function GET() {
       .from(media)
       .orderBy(desc(media.createdAt));
   } catch (e) {
-    dbError = e instanceof Error ? e.message : String(e);
+    const code = pgErrorCode(e);
+    dbError = `${e instanceof Error ? e.message : String(e)}${code ? ` (SQLSTATE ${code})` : ""}`;
     console.warn("[media] select failed, fallback legacy", dbError);
     try {
       rows = await legacyList();
@@ -239,25 +244,36 @@ export async function POST(req: Request) {
   }
 
   const form = await req.formData().catch(() => null);
-  if (!form) return jsonError("Formulaire invalide.");
+  if (!form) {
+    // Body illisible : le plus souvent la requête a été tronquée par une
+    // limite de taille (proxy/plateforme). Message explicite au lieu d'un
+    // échec silencieux.
+    return jsonError(
+      `Requête d'upload illisible — fichier trop volumineux ? Limite : ${MEDIA_MAX_SIZE_LABEL} par fichier.`,
+      413
+    );
+  }
 
   const files = form.getAll("file") as File[];
   const single = form.get("file") as File | null;
   const list = files.length > 0 ? files : single ? [single] : [];
 
-  if (list.length === 0) return jsonError("Fichier requis (JPG, PNG, WEBP, SVG, GIF, AVIF).");
+  if (list.length === 0) return jsonError(`Fichier requis (JPG, PNG, WEBP, SVG, GIF, AVIF) — ${MEDIA_MAX_SIZE_LABEL} max.`);
 
   const uploaded: Record<string, unknown>[] = [];
 
   for (const file of list) {
-    if (typeof file.arrayBuffer !== "function") continue;
+    if (typeof file.arrayBuffer !== "function") {
+      // Ne pas ignorer silencieusement un champ inattendu.
+      return jsonError(`Champ "file" invalide pour ${file?.name ?? "fichier inconnu"}.`);
+    }
 
     const ext = getFileExtension(file.name);
     if (!isAllowedExtension(ext) || !OK.includes(ext)) {
       return jsonError(`Format .${ext} non supporté. Autorisés : ${OK.join(", ")}`);
     }
     if (file.size > MAX_SIZE) {
-      return jsonError(`Fichier trop volumineux (${(file.size / 1024 / 1024).toFixed(1)} Mo) — 8 Mo max.`);
+      return jsonError(`Fichier trop volumineux (${(file.size / 1024 / 1024).toFixed(1)} Mo) — ${MEDIA_MAX_SIZE_LABEL} max.`);
     }
     const id = crypto.randomUUID();
     const baseName =
@@ -273,7 +289,7 @@ export async function POST(req: Request) {
         return jsonError("Le contenu du fichier n'est pas une image reconnue.");
       }
       if (data.length > MAX_SIZE) {
-        return jsonError(`Fichier trop volumineux (${(data.length / 1024 / 1024).toFixed(1)} Mo) — 8 Mo max.`);
+        return jsonError(`Fichier trop volumineux (${(data.length / 1024 / 1024).toFixed(1)} Mo) — ${MEDIA_MAX_SIZE_LABEL} max.`);
       }
 
       const size = readImageSize(data);
@@ -313,10 +329,23 @@ export async function POST(req: Request) {
 
       await audit(g.email!, "media.upload.db", row.path);
     } catch (err) {
+      const code = pgErrorCode(err);
+      console.error("[media upload] failed", err instanceof Error ? err.message : String(err), code ? `SQLSTATE ${code}` : "");
+      if (isMissingSchemaError(err)) {
+        return jsonError(
+          `Échec upload ${file.name} : la colonne "media.data" est absente. Appliquez ${MEDIA_MIGRATION_FILE} sur la base.`,
+          503
+        );
+      }
       const msg = err instanceof Error ? err.message : String(err);
-      console.error("[media upload] failed", msg);
-      return jsonError(`Échec upload ${file.name} : ${msg}`);
+      return jsonError(`Échec upload ${file.name} : ${msg}${code ? ` (SQLSTATE ${code})` : ""}`);
     }
+  }
+
+  // Aucun fichier n'a pu être inséré : réponse en erreur, jamais un succès vide
+  // qui ferait croire à l'admin que l'upload a réussi.
+  if (uploaded.length === 0) {
+    return jsonError("Aucun fichier valide n'a pu être enregistré.", 400);
   }
 
   return Response.json({ items: uploaded, ok: true, storage: "postgresql" }, { status: 201 });

@@ -26,6 +26,11 @@ interface Diagnostics {
   pendingMigration: string | null;
 }
 
+// Même limite que le serveur (src/lib/media.ts) : contrôles faits côté client
+// pour rejeter immédiatement et explicitement les fichiers trop gros.
+const MEDIA_MAX_MB = 4;
+const ALLOWED_UPLOAD_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "svg", "gif", "avif"];
+
 export default function MediaClient() {
   const [items, setItems] = useState<MediaItem[]>([]);
   const [usage, setUsage] = useState<Record<string, string[]>>({});
@@ -37,7 +42,19 @@ export default function MediaClient() {
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  // Miniatures dont le chargement a échoué : on affiche « Image indisponible »
+  // au lieu d'une image de repli trompeuse.
+  const [failedThumbs, setFailedThumbs] = useState<Set<string>>(new Set());
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const markThumbFailed = useCallback((id: string) => {
+    setFailedThumbs((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  }, []);
 
   const load = useCallback(async () => {
     setError(null);
@@ -68,35 +85,72 @@ export default function MediaClient() {
     setError(null);
     setSuccess(null);
     let okCount = 0;
-    let lastError: string | null = null;
+    const errors: string[] = [];
+
+    // Contrôles côté client AVANT l'envoi : un fichier refusé ne part jamais
+    // sur le réseau, sinon l'échec (limite proxy/plateforme) restait muet.
+    const sendable = files.filter((file) => {
+      const ext = (file.name.split(".").pop() ?? "").toLowerCase();
+      if (!ALLOWED_UPLOAD_EXTENSIONS.includes(ext)) {
+        errors.push(
+          `${file.name} : format .${ext || "?"} non supporté (autorisés : ${ALLOWED_UPLOAD_EXTENSIONS.join(", ")})`
+        );
+        return false;
+      }
+      if (file.size > MEDIA_MAX_MB * 1024 * 1024) {
+        errors.push(`${file.name} : ${(file.size / 1024 / 1024).toFixed(1)} Mo — ${MEDIA_MAX_MB} Mo max`);
+        return false;
+      }
+      return true;
+    });
 
     try {
-      for (const file of files) {
+      for (const file of sendable) {
         const fd = new FormData();
         fd.append("file", file);
-        const res = await fetch("/api/admin/media", { method: "POST", body: fd });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          lastError = data.error ?? `Échec upload ${file.name} (${res.status})`;
-          setError(lastError);
-        } else {
-          okCount++;
-          if (data.items?.[0]?.displayUrl) {
-            setSuccess(`Upload réussi: ${file.name} → ${data.items[0].displayUrl.slice(0, 60)}...`);
-          }
+        let res: Response;
+        try {
+          res = await fetch("/api/admin/media", { method: "POST", body: fd });
+        } catch (e: any) {
+          errors.push(`${file.name} : erreur réseau (${e?.message ?? e})`);
+          continue;
         }
+        // La réponse peut ne pas être du JSON (page d'erreur HTML d'un proxy
+        // quand le body dépasse la limite) : on ne la suppose jamais lisible,
+        // sinon l'échec passait inaperçu.
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || data.ok !== true) {
+          errors.push(
+            data?.error ??
+              (res.status === 413
+                ? `${file.name} : refusé par le serveur — ${MEDIA_MAX_MB} Mo max`
+                : `${file.name} : échec (HTTP ${res.status}${data ? "" : ", réponse illisible"})`)
+          );
+          continue;
+        }
+        // Un succès sans item inséré = échec déguisé.
+        const inserted = Array.isArray(data.items) ? data.items.length : 0;
+        if (inserted === 0) {
+          errors.push(`${file.name} : aucun fichier enregistré côté serveur`);
+          continue;
+        }
+        okCount++;
       }
-      if (okCount > 0) {
-        setSuccess(`${okCount} image${okCount > 1 ? "s" : ""} uploadée${okCount > 1 ? "s" : ""} avec succès${lastError ? ` — mais ${lastError}` : ""}`);
-      }
-    } catch (e: any) {
-      setError(`Erreur réseau upload: ${e?.message ?? e}`);
     } finally {
       setUploading(false);
       await load();
       if (fileRef.current) fileRef.current.value = "";
-      // auto-clear success after 4s
-      if (okCount > 0) setTimeout(() => setSuccess(null), 4000);
+      // `load()` réinitialise l'erreur : le bilan est ré-affiché APRÈS le
+      // rechargement, sinon tout échec d'upload disparaissait aussitôt
+      // (l'« erreur d'upload silencieuse »).
+      if (errors.length > 0) setError(errors.join("\n"));
+      if (okCount > 0) {
+        const suffix = errors.length > 0 ? ` — ${errors.length} échec${errors.length > 1 ? "s" : ""}` : "";
+        setSuccess(
+          `${okCount} image${okCount > 1 ? "s" : ""} uploadée${okCount > 1 ? "s" : ""} avec succès${suffix}`
+        );
+        setTimeout(() => setSuccess(null), 4000);
+      }
     }
   };
 
@@ -233,7 +287,7 @@ export default function MediaClient() {
           className="hidden"
           onChange={(e) => e.target.files && uploadFiles(e.target.files)}
         />
-        <p className="text-xs text-faint">JPG · PNG · WEBP · SVG · GIF · AVIF — 8 Mo max · Plusieurs fichiers · Stockage en base PostgreSQL</p>
+        <p className="text-xs text-faint">JPG · PNG · WEBP · SVG · GIF · AVIF — 4 Mo max · Plusieurs fichiers · Stockage en base PostgreSQL</p>
       </div>
 
       {/* Drag & drop zone */}
@@ -275,16 +329,20 @@ export default function MediaClient() {
                 <div key={m.id} className="group relative flex flex-col overflow-hidden rounded-xl border border-line bg-surface/60 transition-colors hover:border-gold/30">
                   {/* Thumbnail */}
                   <div className="relative aspect-square w-full overflow-hidden bg-night">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={display}
-                      alt={m.name}
-                      className="h-full w-full object-cover"
-                      loading="lazy"
-                      onError={(e) => {
-                        (e.currentTarget as HTMLImageElement).src = "/images/naissance.jpg";
-                      }}
-                    />
+                    {failedThumbs.has(m.id) ? (
+                      <div className="flex h-full w-full items-center justify-center p-2 text-center">
+                        <span className="text-[11px] uppercase tracking-wide text-faint">Image indisponible</span>
+                      </div>
+                    ) : (
+                      /* eslint-disable-next-line @next/next/no-img-element */
+                      <img
+                        src={display}
+                        alt={m.name}
+                        className="h-full w-full object-cover"
+                        loading="lazy"
+                        onError={() => markThumbFailed(m.id)}
+                      />
+                    )}
                     <div className="absolute left-2 top-2 flex gap-1">
                       <span className={`rounded-full px-2 py-0.5 text-[9px] tracking-wide uppercase backdrop-blur ${isDb ? "bg-gold/90 text-night" : "bg-black/60 text-white/80"}`}>
                         {isDb ? "PostgreSQL" : m.storage}

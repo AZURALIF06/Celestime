@@ -26,6 +26,11 @@ interface MediaPickerProps {
   title?: string;
 }
 
+// Même limite que le serveur (src/lib/media.ts) : les fichiers trop gros sont
+// refusés côté client avec un message explicite, sans aller-retour réseau.
+const MEDIA_MAX_MB = 4;
+const ALLOWED_UPLOAD_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "svg", "gif", "avif"];
+
 export default function MediaPicker({
   open,
   multiple = false,
@@ -41,7 +46,19 @@ export default function MediaPicker({
   const [copied, setCopied] = useState<string | null>(null);
   const [storageReady, setStorageReady] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Miniatures en échec : on affiche « Image indisponible » au lieu de masquer
+  // l'image silencieusement.
+  const [failedThumbs, setFailedThumbs] = useState<Set<string>>(new Set());
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const markThumbFailed = useCallback((id: string) => {
+    setFailedThumbs((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  }, []);
 
   const load = useCallback(async () => {
     setError(null);
@@ -80,22 +97,60 @@ export default function MediaPicker({
     if (!files || files.length === 0) return;
     setUploading(true);
     setError(null);
+    const errors: string[] = [];
+
+    // Contrôles côté client AVANT l'envoi (format + taille), messages explicites.
+    const sendable = Array.from(files).filter((file) => {
+      const ext = (file.name.split(".").pop() ?? "").toLowerCase();
+      if (!ALLOWED_UPLOAD_EXTENSIONS.includes(ext)) {
+        errors.push(
+          `${file.name} : format .${ext || "?"} non supporté (autorisés : ${ALLOWED_UPLOAD_EXTENSIONS.join(", ")})`
+        );
+        return false;
+      }
+      if (file.size > MEDIA_MAX_MB * 1024 * 1024) {
+        errors.push(`${file.name} : ${(file.size / 1024 / 1024).toFixed(1)} Mo — ${MEDIA_MAX_MB} Mo max`);
+        return false;
+      }
+      return true;
+    });
+
     try {
-      for (const file of Array.from(files)) {
+      for (const file of sendable) {
         const fd = new FormData();
         fd.append("file", file);
-        const res = await fetch("/api/admin/media", { method: "POST", body: fd });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          setError(data.error ?? `Échec upload ${file.name}`);
+        let res: Response;
+        try {
+          res = await fetch("/api/admin/media", { method: "POST", body: fd });
+        } catch (e: any) {
+          errors.push(`${file.name} : erreur réseau (${e?.message ?? e})`);
+          continue;
+        }
+        // La réponse peut ne pas être du JSON (erreur proxy/limite body) :
+        // ne jamais la supposer lisible, sinon l'échec passait inaperçu.
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || data.ok !== true) {
+          errors.push(
+            data?.error ??
+              (res.status === 413
+                ? `${file.name} : refusé par le serveur — ${MEDIA_MAX_MB} Mo max`
+                : `${file.name} : échec (HTTP ${res.status})`)
+          );
+          continue;
+        }
+        const inserted = Array.isArray(data.items) ? data.items.length : 0;
+        if (inserted === 0) {
+          errors.push(`${file.name} : aucun fichier enregistré côté serveur`);
+          continue;
         }
       }
-      await load();
-    } catch (e: any) {
-      setError(`Erreur réseau upload: ${e?.message ?? e}`);
     } finally {
       setUploading(false);
+      await load();
       if (fileRef.current) fileRef.current.value = "";
+      // `load()` réinitialise l'erreur : ré-afficher le bilan après le
+      // rechargement, sinon l'échec d'upload disparaissait aussitôt.
+      if (errors.length > 0) setError(errors.join("\n"));
     }
   };
 
@@ -135,7 +190,7 @@ export default function MediaPicker({
           <div>
             <h2 className="font-display text-xl text-ink">{title}</h2>
             <p className="mt-0.5 text-xs text-faint">
-              {multiple ? "Sélection multiple possible" : "Sélection unique"} · {items.length} image{items.length !== 1 ? "s" : ""} ·{" "}
+              {multiple ? "Sélection multiple possible" : "Sélection unique"} · {items.length} image{items.length !== 1 ? "s" : ""} · 4 Mo max ·{" "}
               {storageReady === null ? "Chargement…" : storageReady ? "Stockage PostgreSQL actif" : "Colonne media.data absente — migration requise"}
             </p>
           </div>
@@ -225,16 +280,20 @@ export default function MediaPicker({
                     }`}
                   >
                     <button onClick={() => toggleSelect(url)} className="block w-full text-left">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={url}
-                        alt={m.name}
-                        className="aspect-square w-full object-cover"
-                        loading="lazy"
-                        onError={(e) => {
-                          (e.currentTarget as HTMLImageElement).style.display = "none";
-                        }}
-                      />
+                      {failedThumbs.has(m.id) ? (
+                        <div className="flex aspect-square w-full items-center justify-center p-2 text-center">
+                          <span className="text-[11px] uppercase tracking-wide text-faint">Image indisponible</span>
+                        </div>
+                      ) : (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={url}
+                          alt={m.name}
+                          className="aspect-square w-full object-cover"
+                          loading="lazy"
+                          onError={() => markThumbFailed(m.id)}
+                        />
+                      )}
                       {isSelected && (
                         <div className="absolute right-2 top-2 rounded-full bg-gold px-2 py-0.5 text-[10px] font-bold tracking-wide text-night uppercase">
                           ✓ Sélectionnée
