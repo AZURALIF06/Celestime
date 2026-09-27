@@ -80,7 +80,7 @@ export async function inspectSiteMap(): Promise<SiteMapInspection> {
     id: page.id,
     name: page.name,
     slug: page.slug,
-    path: page.slug === "faq" || page.slug === "boutique" || page.slug === "comment-ca-marche" ? `/${page.slug}` : `/p/${page.slug}`,
+    path: page.slug === "faq" || page.slug === "boutique" || page.slug === "comment-ca-marche" || page.slug === "livraison" ? `/${page.slug}` : `/p/${page.slug}`,
     status: page.status,
     updatedAt: asIso(page.updatedAt),
     editHref: `/admin/editor/${encodeURIComponent(page.id)}`,

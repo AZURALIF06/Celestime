@@ -7,6 +7,7 @@ import { emptyPage, type CmsPage } from "@/lib/cms";
 import { createBoutiqueCmsPage, hasBoutiqueProductBlocks } from "@/lib/boutique-cms";
 import { createFaqCmsPage } from "@/lib/faq-cms";
 import { createCommentCaMarcheCmsPage, isValidCommentCaMarcheCmsPage } from "@/lib/comment-ca-marche-cms";
+import { createLivraisonCmsPage, isValidLivraisonCmsPage } from "@/lib/livraison-cms";
 
 export const runtime = "nodejs";
 
@@ -112,6 +113,27 @@ export async function POST(req: Request) {
       await audit(g.email!, "page.connect_comment_ca_marche", "comment-ca-marche");
       return Response.json({ id, slug: "comment-ca-marche", existing: false }, { status: 201 });
     }
+    case "connectLivraison": {
+      const existing = (await db.select().from(pages).where(eq(pages.slug, "livraison")))[0];
+      if (existing) return Response.json({ id: existing.id, slug: existing.slug, existing: true });
+
+      const id = crypto.randomUUID();
+      await db.insert(pages).values({
+        id,
+        slug: "livraison",
+        name: "Livraison",
+        status: "draft",
+        draft: createLivraisonCmsPage(),
+        published: null,
+        seo: {
+          title: "Livraison",
+          description: "Délais, tarifs et modalités de livraison des cartes du ciel Célestime.",
+          noindex: true,
+        },
+      });
+      await audit(g.email!, "page.connect_livraison", "livraison");
+      return Response.json({ id, slug: "livraison", existing: false }, { status: 201 });
+    }
     case "create": {
       if (!body.name || typeof body.name !== "string") return jsonError("Le nom de la page est requis.");
       let slug = slugify(body.slug || body.name);
@@ -137,6 +159,12 @@ export async function POST(req: Request) {
     case "update": {
       const row = (await db.select().from(pages).where(eq(pages.id, body.id)))[0];
       if (!row) return jsonError("Page introuvable.", 404);
+      if (row.slug === "livraison") {
+        if (body.slug && slugify(body.slug) !== "livraison") return jsonError("L’URL de la page Livraison est réservée.");
+        if (body.publish === true && !isValidLivraisonCmsPage(body.data ?? row.draft)) {
+          return jsonError("Le contenu Livraison est incomplet ou invalide ; la publication a été refusée.");
+        }
+      }
       if (row.slug === "comment-ca-marche") {
         if (body.slug && slugify(body.slug) !== "comment-ca-marche") return jsonError("L’URL de la page Comment ça marche est réservée.");
         if (body.publish === true && !isValidCommentCaMarcheCmsPage(body.data ?? row.draft)) {

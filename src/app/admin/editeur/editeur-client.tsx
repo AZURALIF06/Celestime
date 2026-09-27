@@ -40,6 +40,7 @@ export default function SiteMapClient(initial: Props) {
   const [connectingFaq, setConnectingFaq] = useState(false);
   const [connectingBoutique, setConnectingBoutique] = useState(false);
   const [connectingCommentCaMarche, setConnectingCommentCaMarche] = useState(false);
+  const [connectingLivraison, setConnectingLivraison] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const entries = useMemo(() => {
@@ -55,6 +56,7 @@ export default function SiteMapClient(initial: Props) {
       let connectFaq = false;
       let connectBoutique = false;
       let connectCommentCaMarche = false;
+      let connectLivraison = false;
       let media = route.media;
 
       if (route.path === "/faq") {
@@ -102,6 +104,21 @@ export default function SiteMapClient(initial: Props) {
           action = null;
           connectCommentCaMarche = true;
         }
+      } else if (route.path === "/livraison") {
+        const livraisonPage = inspection.cmsPages.find((page) => page.slug === "livraison");
+        if (livraisonPage) {
+          type = "Page CMS juridique";
+          status = livraisonPage.status === "published" ? "Publiée via CMS" : "Brouillon — fallback public conservé";
+          href = livraisonPage.editHref;
+          action = "Éditer";
+          media = livraisonPage.media;
+        } else {
+          type = "Page éditoriale juridique";
+          status = "Fallback actuel — non connectée au CMS";
+          href = null;
+          action = null;
+          connectLivraison = true;
+        }
       }
 
       if (isCmsPattern) {
@@ -135,11 +152,12 @@ export default function SiteMapClient(initial: Props) {
         connectFaq,
         connectBoutique,
         connectCommentCaMarche,
+        connectLivraison,
       };
     });
 
     const cmsEntries = [
-      ...inspection.cmsPages.filter((page) => page.slug !== "faq" && page.slug !== "boutique" && page.slug !== "comment-ca-marche").map((page) => ({
+      ...inspection.cmsPages.filter((page) => page.slug !== "faq" && page.slug !== "boutique" && page.slug !== "comment-ca-marche" && page.slug !== "livraison").map((page) => ({
         key: `cms:${page.id}`,
         path: page.path,
         name: page.name,
@@ -153,6 +171,7 @@ export default function SiteMapClient(initial: Props) {
         connectFaq: false,
         connectBoutique: false,
         connectCommentCaMarche: false,
+        connectLivraison: false,
       })),
       ...inspection.blogPosts.map((post) => ({
         key: `blog:${post.id}`,
@@ -168,6 +187,7 @@ export default function SiteMapClient(initial: Props) {
         connectFaq: false,
         connectBoutique: false,
         connectCommentCaMarche: false,
+        connectLivraison: false,
       })),
     ];
 
@@ -230,6 +250,25 @@ export default function SiteMapClient(initial: Props) {
       setActionError(error instanceof Error ? error.message : "Erreur lors de la connexion de la page.");
     } finally {
       setConnectingCommentCaMarche(false);
+    }
+  }
+
+  async function connectLivraison() {
+    setConnectingLivraison(true);
+    setActionError(null);
+    try {
+      const response = await fetch("/api/admin/pages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "connectLivraison" }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.id) throw new Error(data.error ?? "La connexion de la page Livraison au CMS a échoué.");
+      router.push(`/admin/editor/${data.id}`);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Erreur lors de la connexion de la page Livraison.");
+    } finally {
+      setConnectingLivraison(false);
     }
   }
 
@@ -327,6 +366,10 @@ export default function SiteMapClient(initial: Props) {
                     ) : entry.connectCommentCaMarche ? (
                       <button onClick={connectCommentCaMarche} disabled={connectingCommentCaMarche} className="rounded-full bg-gold px-3 py-1.5 text-[11px] text-night hover:bg-goldsoft disabled:opacity-50">
                         {connectingCommentCaMarche ? "Connexion…" : "Connecter au CMS"}
+                      </button>
+                    ) : entry.connectLivraison ? (
+                      <button onClick={connectLivraison} disabled={connectingLivraison} className="rounded-full bg-gold px-3 py-1.5 text-[11px] text-night hover:bg-goldsoft disabled:opacity-50">
+                        {connectingLivraison ? "Connexion…" : "Connecter au CMS"}
                       </button>
                     ) : entry.href && entry.action ? (
                       <Link href={entry.href} target={entry.action === "Voir la page" ? "_blank" : undefined} rel={entry.action === "Voir la page" ? "noreferrer" : undefined} className="inline-block rounded-full border border-line px-3 py-1.5 text-[11px] text-ink hover:border-gold hover:text-gold">

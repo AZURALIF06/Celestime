@@ -5,6 +5,7 @@ import { AdminShell } from "@/components/admin/admin-ui";
 import { PageCanvas } from "@/app/p/[slug]/page-canvas";
 import { BoutiqueCmsLayout } from "@/components/page/boutique-cms-layout";
 import { CommentCaMarcheCmsLayout } from "@/components/page/comment-ca-marche-cms-layout";
+import { LivraisonCmsContent } from "@/components/page/livraison-cms-content";
 import { db } from "@/db";
 import { pages } from "@/db/schema";
 import { getProducts } from "@/lib/catalog";
@@ -12,6 +13,7 @@ import { requireAdmin } from "@/lib/auth";
 import { emptyPage, type CmsPage } from "@/lib/cms";
 import { isValidBoutiqueCmsPage } from "@/lib/boutique-cms";
 import { isValidCommentCaMarcheCmsPage } from "@/lib/comment-ca-marche-cms";
+import { isValidLivraisonCmsPage } from "@/lib/livraison-cms";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +27,7 @@ export default async function AdminDraftPreview({ params }: { params: Promise<{ 
   const boutiqueProducts = row.slug === "boutique" ? (await getProducts()).filter((product) => product.status === "active") : [];
   const validBoutiqueDraft = row.slug === "boutique" && isValidBoutiqueCmsPage(draft);
   const validCommentCaMarcheDraft = row.slug === "comment-ca-marche" && isValidCommentCaMarcheCmsPage(draft);
+  const validLivraisonDraft = row.slug === "livraison" && isValidLivraisonCmsPage(draft);
   return (
     <AdminShell title={`Aperçu — ${row.name}`}>
       <div className="space-y-4">
@@ -50,6 +53,14 @@ export default async function AdminDraftPreview({ params }: { params: Promise<{ 
             </div>
           ) : (
             <p role="alert" className="rounded-xl border border-danger/30 bg-danger/5 p-4 text-sm text-danger">Brouillon Comment ça marche incomplet ou invalide.</p>
+          )
+        ) : row.slug === "livraison" ? (
+          validLivraisonDraft ? (
+            <div className="overflow-hidden rounded-xl border border-line">
+              <LivraisonCmsContent page={draft} />
+            </div>
+          ) : (
+            <p role="alert" className="rounded-xl border border-danger/30 bg-danger/5 p-4 text-sm text-danger">Brouillon Livraison incomplet ou invalide.</p>
           )
         ) : (
           <div className="overflow-hidden rounded-xl border border-line">
