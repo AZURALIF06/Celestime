@@ -11,6 +11,16 @@
 /** Route publique qui sert les octets depuis la base. */
 export const MEDIA_ROUTE = "/api/media";
 
+/**
+ * Taille maximale d'un fichier importé : 4 Mo.
+ * Volontairement sous les limites de body des proxys serverless (~4,5 Mo) :
+ * au-delà, la requête est rejetée avant d'atteindre le handler et l'erreur
+ * remonte au client sous forme d'une page HTML non-JSON — d'où des échecs
+ * d'upload qui semblaient « silencieux ».
+ */
+export const MEDIA_MAX_SIZE = 4 * 1024 * 1024;
+export const MEDIA_MAX_SIZE_LABEL = "4 Mo";
+
 const OK_EXT = ["jpg", "jpeg", "png", "webp", "svg", "gif", "avif"] as const;
 
 const OK_MIME: Record<string, string> = {
@@ -225,6 +235,43 @@ export interface MediaDiagnostics {
 }
 
 export const MEDIA_MIGRATION_FILE = "drizzle/0002_media_db_storage.sql";
+
+// ---------------------------------------------------------------------------
+// Détection des erreurs PostgreSQL.
+//
+// Drizzle enveloppe l'erreur d'origine du driver : le code SQLSTATE (« 42703 »
+// colonne inconnue, « 42P01 » table inconnue, …) n'est PAS dans `e.message`
+// mais dans `e.cause.code`. Analyser seulement le message fait donc échouer la
+// détection (« colonne media.data absente » jamais reconnue). On remonte ici
+// toute la chaîne des `cause` pour retrouver le code.
+// ---------------------------------------------------------------------------
+
+const MISSING_SCHEMA_CODES = new Set(["42703", "42P01", "42883"]);
+
+/** Code SQLSTATE PostgreSQL porté par l'erreur ou l'une de ses `cause`. */
+export function pgErrorCode(e: unknown): string | null {
+  let cur: unknown = e;
+  for (let depth = 0; cur && depth < 6; depth++) {
+    const code = (cur as { code?: unknown }).code;
+    if (typeof code === "string" && /^\d{5}$/.test(code)) return code;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+/** Vrai si l'erreur correspond à un schéma incomplet (colonne/table absente). */
+export function isMissingSchemaError(e: unknown): boolean {
+  if (MISSING_SCHEMA_CODES.has(pgErrorCode(e) ?? "")) return true;
+  // Repli sur le message (driver sans SQLSTATE), cause incluse.
+  const parts: string[] = [];
+  let cur: unknown = e;
+  for (let depth = 0; cur && depth < 6; depth++) {
+    if (cur instanceof Error) parts.push(cur.message);
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  const msg = parts.join(" ").toLowerCase();
+  return msg.includes("does not exist") || msg.includes("column") || msg.includes("relation");
+}
 
 /** Vérifie la présence de la colonne `data` sans échouer si la table est absente. */
 export async function probeDataColumn(

@@ -5,7 +5,7 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { media } from "@/db/schema";
-import { MEDIA_MIGRATION_FILE, effectiveMimeType, sanitizeName } from "@/lib/media";
+import { MEDIA_MIGRATION_FILE, effectiveMimeType, isMissingSchemaError, sanitizeName } from "@/lib/media";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,7 +46,9 @@ export async function GET(
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.warn("[media] read failed", msg);
-    if (msg.includes("column") || msg.includes("does not exist")) {
+    // Détection via le SQLSTATE porté par e.cause.code (drizzle enveloppe
+    // l'erreur du driver pg : le code n'apparaît pas dans e.message).
+    if (isMissingSchemaError(e)) {
       return new Response(
         `Médiathèque indisponible : la colonne "media.data" est absente. Appliquez ${MEDIA_MIGRATION_FILE} sur la base.`,
         { status: 503, headers: { "Content-Type": "text/plain; charset=utf-8" } }
