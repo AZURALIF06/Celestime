@@ -381,10 +381,10 @@ export default function PageEditor({
           aria-label="Nom de la page"
         />
         <label className="flex items-center gap-1 text-xs text-faint">
-          {initialSlug === "faq" || initialSlug === "boutique" ? "/" : "/p/"}
+          {initialSlug === "faq" || initialSlug === "boutique" || initialSlug === "comment-ca-marche" ? "/" : "/p/"}
           <input
             value={slug}
-            readOnly={initialSlug === "faq" || initialSlug === "boutique"}
+            readOnly={initialSlug === "faq" || initialSlug === "boutique" || initialSlug === "comment-ca-marche"}
             onChange={(e) => setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-"))}
             className="w-36 rounded-lg border border-line bg-night px-3 py-1.5 text-xs focus:border-gold read-only:opacity-70"
             aria-label="URL de la page"
@@ -414,7 +414,7 @@ export default function PageEditor({
           <span className={`rounded-full px-3 py-1 text-[11px] uppercase tracking-wide ${status === "published" ? "bg-gold/15 text-gold" : "bg-raised text-faint"}`}>
             {status === "published" ? "Publiée" : "Brouillon"}{dirty ? " •" : ""}
           </span>
-          <Link href={slug === "faq" || slug === "boutique" ? `/${slug}` : `/p/${slug}`} target="_blank" className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:text-ink">
+          <Link href={slug === "faq" || slug === "boutique" || slug === "comment-ca-marche" ? `/${slug}` : `/p/${slug}`} target="_blank" className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:text-ink">
             Voir le site
           </Link>
           <button onClick={previewDraft} disabled={saving} className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50">

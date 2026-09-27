@@ -6,6 +6,7 @@ import { audit } from "@/lib/auth";
 import { emptyPage, type CmsPage } from "@/lib/cms";
 import { createBoutiqueCmsPage, hasBoutiqueProductBlocks } from "@/lib/boutique-cms";
 import { createFaqCmsPage } from "@/lib/faq-cms";
+import { createCommentCaMarcheCmsPage, isValidCommentCaMarcheCmsPage } from "@/lib/comment-ca-marche-cms";
 
 export const runtime = "nodejs";
 
@@ -90,6 +91,27 @@ export async function POST(req: Request) {
       await audit(g.email!, "page.connect_boutique", "boutique");
       return Response.json({ id, slug: "boutique", existing: false }, { status: 201 });
     }
+    case "connectCommentCaMarche": {
+      const existing = (await db.select().from(pages).where(eq(pages.slug, "comment-ca-marche")))[0];
+      if (existing) return Response.json({ id: existing.id, slug: existing.slug, existing: true });
+
+      const id = crypto.randomUUID();
+      await db.insert(pages).values({
+        id,
+        slug: "comment-ca-marche",
+        name: "Comment ça marche",
+        status: "draft",
+        draft: createCommentCaMarcheCmsPage(),
+        published: null,
+        seo: {
+          title: "Comment ça marche",
+          description: "Éléments éditoriaux de la page Comment ça marche.",
+          noindex: true,
+        },
+      });
+      await audit(g.email!, "page.connect_comment_ca_marche", "comment-ca-marche");
+      return Response.json({ id, slug: "comment-ca-marche", existing: false }, { status: 201 });
+    }
     case "create": {
       if (!body.name || typeof body.name !== "string") return jsonError("Le nom de la page est requis.");
       let slug = slugify(body.slug || body.name);
@@ -115,6 +137,12 @@ export async function POST(req: Request) {
     case "update": {
       const row = (await db.select().from(pages).where(eq(pages.id, body.id)))[0];
       if (!row) return jsonError("Page introuvable.", 404);
+      if (row.slug === "comment-ca-marche") {
+        if (body.slug && slugify(body.slug) !== "comment-ca-marche") return jsonError("L’URL de la page Comment ça marche est réservée.");
+        if (body.publish === true && !isValidCommentCaMarcheCmsPage(body.data ?? row.draft)) {
+          return jsonError("Le contenu Comment ça marche est incomplet ou invalide ; la publication a été refusée.");
+        }
+      }
       if (row.slug === "boutique") {
         if (body.slug && slugify(body.slug) !== "boutique") return jsonError("L’URL de la page Boutique est réservée.");
         if (hasBoutiqueProductBlocks(body.data ?? row.draft)) {

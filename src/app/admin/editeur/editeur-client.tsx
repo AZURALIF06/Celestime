@@ -39,6 +39,7 @@ export default function SiteMapClient(initial: Props) {
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [connectingFaq, setConnectingFaq] = useState(false);
   const [connectingBoutique, setConnectingBoutique] = useState(false);
+  const [connectingCommentCaMarche, setConnectingCommentCaMarche] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const entries = useMemo(() => {
@@ -53,6 +54,7 @@ export default function SiteMapClient(initial: Props) {
       let action = isAdmin ? "Ouvrir" : !dynamic ? "Voir la page" : null;
       let connectFaq = false;
       let connectBoutique = false;
+      let connectCommentCaMarche = false;
       let media = route.media;
 
       if (route.path === "/faq") {
@@ -84,6 +86,21 @@ export default function SiteMapClient(initial: Props) {
           href = null;
           action = null;
           connectBoutique = true;
+        }
+      } else if (route.path === "/comment-ca-marche") {
+        const commentPage = inspection.cmsPages.find((page) => page.slug === "comment-ca-marche");
+        if (commentPage) {
+          type = "Page CMS";
+          status = commentPage.status === "published" ? "Publiée via CMS" : "Brouillon — fallback public conservé";
+          href = commentPage.editHref;
+          action = "Éditer";
+          media = commentPage.media;
+        } else {
+          type = "Page éditoriale";
+          status = "Fallback actuel — non connectée au CMS";
+          href = null;
+          action = null;
+          connectCommentCaMarche = true;
         }
       }
 
@@ -117,11 +134,12 @@ export default function SiteMapClient(initial: Props) {
         admin: isAdmin,
         connectFaq,
         connectBoutique,
+        connectCommentCaMarche,
       };
     });
 
     const cmsEntries = [
-      ...inspection.cmsPages.filter((page) => page.slug !== "faq" && page.slug !== "boutique").map((page) => ({
+      ...inspection.cmsPages.filter((page) => page.slug !== "faq" && page.slug !== "boutique" && page.slug !== "comment-ca-marche").map((page) => ({
         key: `cms:${page.id}`,
         path: page.path,
         name: page.name,
@@ -134,6 +152,7 @@ export default function SiteMapClient(initial: Props) {
         admin: false,
         connectFaq: false,
         connectBoutique: false,
+        connectCommentCaMarche: false,
       })),
       ...inspection.blogPosts.map((post) => ({
         key: `blog:${post.id}`,
@@ -148,6 +167,7 @@ export default function SiteMapClient(initial: Props) {
         admin: false,
         connectFaq: false,
         connectBoutique: false,
+        connectCommentCaMarche: false,
       })),
     ];
 
@@ -191,6 +211,25 @@ export default function SiteMapClient(initial: Props) {
       setActionError(error instanceof Error ? error.message : "Erreur lors de la connexion de la boutique.");
     } finally {
       setConnectingBoutique(false);
+    }
+  }
+
+  async function connectCommentCaMarche() {
+    setConnectingCommentCaMarche(true);
+    setActionError(null);
+    try {
+      const response = await fetch("/api/admin/pages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "connectCommentCaMarche" }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.id) throw new Error(data.error ?? "La connexion de la page au CMS a échoué.");
+      router.push(`/admin/editor/${data.id}`);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Erreur lors de la connexion de la page.");
+    } finally {
+      setConnectingCommentCaMarche(false);
     }
   }
 
@@ -284,6 +323,10 @@ export default function SiteMapClient(initial: Props) {
                     ) : entry.connectBoutique ? (
                       <button onClick={connectBoutique} disabled={connectingBoutique} className="rounded-full bg-gold px-3 py-1.5 text-[11px] text-night hover:bg-goldsoft disabled:opacity-50">
                         {connectingBoutique ? "Connexion…" : "Connecter l’éditorial"}
+                      </button>
+                    ) : entry.connectCommentCaMarche ? (
+                      <button onClick={connectCommentCaMarche} disabled={connectingCommentCaMarche} className="rounded-full bg-gold px-3 py-1.5 text-[11px] text-night hover:bg-goldsoft disabled:opacity-50">
+                        {connectingCommentCaMarche ? "Connexion…" : "Connecter au CMS"}
                       </button>
                     ) : entry.href && entry.action ? (
                       <Link href={entry.href} target={entry.action === "Voir la page" ? "_blank" : undefined} rel={entry.action === "Voir la page" ? "noreferrer" : undefined} className="inline-block rounded-full border border-line px-3 py-1.5 text-[11px] text-ink hover:border-gold hover:text-gold">

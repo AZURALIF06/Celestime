@@ -4,12 +4,14 @@ import { eq } from "drizzle-orm";
 import { AdminShell } from "@/components/admin/admin-ui";
 import { PageCanvas } from "@/app/p/[slug]/page-canvas";
 import { BoutiqueCmsLayout } from "@/components/page/boutique-cms-layout";
+import { CommentCaMarcheCmsLayout } from "@/components/page/comment-ca-marche-cms-layout";
 import { db } from "@/db";
 import { pages } from "@/db/schema";
 import { getProducts } from "@/lib/catalog";
 import { requireAdmin } from "@/lib/auth";
 import { emptyPage, type CmsPage } from "@/lib/cms";
 import { isValidBoutiqueCmsPage } from "@/lib/boutique-cms";
+import { isValidCommentCaMarcheCmsPage } from "@/lib/comment-ca-marche-cms";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +24,7 @@ export default async function AdminDraftPreview({ params }: { params: Promise<{ 
   const draft = (row.draft as unknown as CmsPage) ?? emptyPage();
   const boutiqueProducts = row.slug === "boutique" ? (await getProducts()).filter((product) => product.status === "active") : [];
   const validBoutiqueDraft = row.slug === "boutique" && isValidBoutiqueCmsPage(draft);
+  const validCommentCaMarcheDraft = row.slug === "comment-ca-marche" && isValidCommentCaMarcheCmsPage(draft);
   return (
     <AdminShell title={`Aperçu — ${row.name}`}>
       <div className="space-y-4">
@@ -39,6 +42,14 @@ export default async function AdminDraftPreview({ params }: { params: Promise<{ 
             </div>
           ) : (
             <p role="alert" className="rounded-xl border border-danger/30 bg-danger/5 p-4 text-sm text-danger">Brouillon Boutique invalide : les données du catalogue ne peuvent pas être incluses dans le CMS.</p>
+          )
+        ) : row.slug === "comment-ca-marche" ? (
+          validCommentCaMarcheDraft ? (
+            <div className="overflow-hidden rounded-xl border border-line">
+              <CommentCaMarcheCmsLayout page={draft} />
+            </div>
+          ) : (
+            <p role="alert" className="rounded-xl border border-danger/30 bg-danger/5 p-4 text-sm text-danger">Brouillon Comment ça marche incomplet ou invalide.</p>
           )
         ) : (
           <div className="overflow-hidden rounded-xl border border-line">
