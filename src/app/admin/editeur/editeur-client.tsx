@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import type { CmsBlogRecord, CmsPageRecord, InspectedMedia } from "@/lib/cms-inspect";
 import { routeIsDynamic, routeLabel, type SiteMapRoute } from "@/lib/site-map";
@@ -31,10 +32,13 @@ function statusLabel(status: string) {
 }
 
 export default function SiteMapClient(initial: Props) {
+  const router = useRouter();
   const [filter, setFilter] = useState<Filter>("public");
   const [inspection, setInspection] = useState(initial);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [connectingFaq, setConnectingFaq] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const entries = useMemo(() => {
     const routeEntries = inspection.routes.map((route) => {
@@ -46,6 +50,25 @@ export default function SiteMapClient(initial: Props) {
       let status = isAdmin ? "Page administrative" : route.kind === "static" ? "Non connectée au CMS" : "Modèle de route";
       let href: string | null = isAdmin ? route.path : !dynamic ? route.path : null;
       let action = isAdmin ? "Ouvrir" : !dynamic ? "Voir la page" : null;
+      let connectFaq = false;
+      let media = route.media;
+
+      if (route.path === "/faq") {
+        const faqPage = inspection.cmsPages.find((page) => page.slug === "faq");
+        if (faqPage) {
+          type = "Page CMS";
+          status = faqPage.status === "published" ? "Publiée via CMS" : "Brouillon — fallback public conservé";
+          href = faqPage.editHref;
+          action = "Éditer";
+          media = faqPage.media;
+        } else {
+          type = "Codée en dur";
+          status = "Fallback actuel — non connectée au CMS";
+          href = null;
+          action = null;
+          connectFaq = true;
+        }
+      }
 
       if (isCmsPattern) {
         type = "Route CMS dynamique";
@@ -73,13 +96,14 @@ export default function SiteMapClient(initial: Props) {
         date: route.lastModified,
         href,
         action,
-        media: route.media,
+        media,
         admin: isAdmin,
+        connectFaq,
       };
     });
 
     const cmsEntries = [
-      ...inspection.cmsPages.map((page) => ({
+      ...inspection.cmsPages.filter((page) => page.slug !== "faq").map((page) => ({
         key: `cms:${page.id}`,
         path: page.path,
         name: page.name,
@@ -90,6 +114,7 @@ export default function SiteMapClient(initial: Props) {
         action: "Éditer",
         media: page.media,
         admin: false,
+        connectFaq: false,
       })),
       ...inspection.blogPosts.map((post) => ({
         key: `blog:${post.id}`,
@@ -102,6 +127,7 @@ export default function SiteMapClient(initial: Props) {
         action: "Gérer dans le blog",
         media: post.media,
         admin: false,
+        connectFaq: false,
       })),
     ];
 
@@ -109,6 +135,25 @@ export default function SiteMapClient(initial: Props) {
       filter === "all" || (filter === "admin" ? entry.admin : !entry.admin)
     );
   }, [filter, inspection]);
+
+  async function connectFaq() {
+    setConnectingFaq(true);
+    setActionError(null);
+    try {
+      const response = await fetch("/api/admin/pages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "connectFaq" }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.id) throw new Error(data.error ?? "La connexion de la FAQ au CMS a échoué.");
+      router.push(`/admin/editor/${data.id}`);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Erreur lors de la connexion de la FAQ.");
+    } finally {
+      setConnectingFaq(false);
+    }
+  }
 
   async function refresh() {
     setRefreshing(true);
@@ -155,9 +200,9 @@ export default function SiteMapClient(initial: Props) {
         <p className="mt-4 text-[11px] text-faint">Cartographie du code générée le {formatDate(inspection.generatedAt)}.</p>
       </section>
 
-      {(inspection.warning || refreshError) && (
+      {(inspection.warning || refreshError || actionError) && (
         <div role="status" className="rounded-xl border border-amber-500/30 bg-amber-950/20 px-4 py-3 text-sm text-amber-200">
-          {refreshError ?? inspection.warning} Les routes du code restent visibles ; les données CMS indisponibles ne sont pas inventées.
+          {actionError ?? refreshError ?? inspection.warning} Les routes du code restent visibles ; les données CMS indisponibles ne sont pas inventées.
         </div>
       )}
 
@@ -191,7 +236,11 @@ export default function SiteMapClient(initial: Props) {
                   <td className="px-4 py-3"><span className={`inline-block rounded-full px-2.5 py-1 text-[10px] ${entry.type.includes("CMS") || entry.type === "Page CMS" || entry.type === "Article CMS" ? "bg-emerald-900/30 text-emerald-200" : "bg-raised text-muted"}`}>{entry.status}</span></td>
                   <td className="px-4 py-3 text-xs text-muted">{formatDate(entry.date)}</td>
                   <td className="px-4 py-3 text-right">
-                    {entry.href && entry.action ? (
+                    {entry.connectFaq ? (
+                      <button onClick={connectFaq} disabled={connectingFaq} className="rounded-full bg-gold px-3 py-1.5 text-[11px] text-night hover:bg-goldsoft disabled:opacity-50">
+                        {connectingFaq ? "Connexion…" : "Connecter au CMS"}
+                      </button>
+                    ) : entry.href && entry.action ? (
                       <Link href={entry.href} target={entry.action === "Voir la page" ? "_blank" : undefined} rel={entry.action === "Voir la page" ? "noreferrer" : undefined} className="inline-block rounded-full border border-line px-3 py-1.5 text-[11px] text-ink hover:border-gold hover:text-gold">
                         {entry.action}
                       </Link>

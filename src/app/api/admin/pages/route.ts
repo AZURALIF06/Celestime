@@ -4,6 +4,7 @@ import { pageTemplates, pageVersions, pages } from "@/db/schema";
 import { guard, jsonError } from "@/lib/admin-guard";
 import { audit } from "@/lib/auth";
 import { emptyPage, type CmsPage } from "@/lib/cms";
+import { createFaqCmsPage } from "@/lib/faq-cms";
 
 export const runtime = "nodejs";
 
@@ -46,6 +47,27 @@ export async function POST(req: Request) {
   }
 
   switch (body.action) {
+    case "connectFaq": {
+      const existing = (await db.select().from(pages).where(eq(pages.slug, "faq")))[0];
+      if (existing) return Response.json({ id: existing.id, slug: existing.slug, existing: true });
+
+      const id = crypto.randomUUID();
+      await db.insert(pages).values({
+        id,
+        slug: "faq",
+        name: "FAQ",
+        status: "draft",
+        draft: createFaqCmsPage(),
+        published: null,
+        seo: {
+          title: "FAQ",
+          description: "Questions fréquentes Célestime.",
+          noindex: true,
+        },
+      });
+      await audit(g.email!, "page.connect_faq", "faq");
+      return Response.json({ id, slug: "faq", existing: false }, { status: 201 });
+    }
     case "create": {
       if (!body.name || typeof body.name !== "string") return jsonError("Le nom de la page est requis.");
       let slug = slugify(body.slug || body.name);
@@ -92,7 +114,7 @@ export async function POST(req: Request) {
         patch.status = "draft";
         await audit(g.email!, "page.unpublish", row.slug);
       }
-      if (body.saveVersion) {
+      if (body.saveVersion && body.publish !== true) {
         await db.insert(pageVersions).values({ pageId: row.id, label: body.saveVersion || "Version manuelle", data: body.data ?? row.draft });
       }
       await db.update(pages).set(patch).where(eq(pages.id, row.id));

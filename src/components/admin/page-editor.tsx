@@ -35,6 +35,7 @@ export default function PageEditor({
   initialName,
   initialSlug,
   initialStatus,
+  initialPublished,
   templates,
 }: {
   pageId: string;
@@ -42,6 +43,7 @@ export default function PageEditor({
   initialName: string;
   initialSlug: string;
   initialStatus: string;
+  initialPublished?: CmsPage | null;
   templates: { id: number; name: string }[];
 }) {
   const router = useRouter();
@@ -49,6 +51,7 @@ export default function PageEditor({
   const [name, setName] = useState(initialName);
   const [slug, setSlug] = useState(initialSlug);
   const [status, setStatus] = useState(initialStatus);
+  const [publishedSnapshot, setPublishedSnapshot] = useState<string | null>(initialPublished ? JSON.stringify(initialPublished) : null);
   const [sel, setSel] = useState<Sel | null>(null);
   const [device, setDevice] = useState<Device>("desktop");
   const [dirty, setDirty] = useState(false);
@@ -98,15 +101,18 @@ export default function PageEditor({
     fetch("/api/admin/pages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: pageId, ...body }) }).then((r) => r.json());
 
   const doSave = useCallback(
-    async (extra: Record<string, unknown> = {}) => {
+    async (extra: Record<string, unknown> = {}): Promise<boolean> => {
       setSaving(true);
       try {
-        await api({ action: "update", name, slug, data: page, ...extra });
+        const result = await api({ action: "update", name, slug, data: page, ...extra });
+        if (result.error) throw new Error(result.error);
         setDirty(false);
         const v = await fetch(`/api/admin/pages?id=${pageId}&full=1`).then((r) => r.json()).catch(() => null);
         if (v) setStatus(v.status ?? status);
+        return true;
       } catch {
         show("Échec de l'enregistrement.");
+        return false;
       } finally {
         setSaving(false);
       }
@@ -336,17 +342,29 @@ export default function PageEditor({
   };
 
   const publish = async (pub: boolean) => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
     setSaving(true);
-    const d = await api({ action: "update", name, slug, data: page, publish: pub, saveVersion: pub ? "Publication" : undefined });
-    if (d.ok !== false) {
+    try {
+      const d = await api({ action: "update", name, slug, data: page, publish: pub, saveVersion: pub ? "Publication" : undefined });
+      if (d.error || d.ok === false) throw new Error(d.error ?? "Publication impossible.");
       setStatus(pub ? "published" : "draft");
+      setDirty(false);
+      if (pub) setPublishedSnapshot(JSON.stringify(page));
       show(pub ? "Page publiée ✓" : "Retirée de la publication.");
       await loadVersionsNow();
+    } catch {
+      show("Échec de la publication.");
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
   const loadVersionsNow = () => api({ action: "versions" }).then((d) => setVersions(d.versions ?? [])).catch(() => {});
+  const previewDraft = async () => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    if (await doSave()) router.push(`/admin/editeur/apercu/${pageId}`);
+  };
 
+  const hasUnpublishedChanges = status === "published" && publishedSnapshot !== JSON.stringify(page);
   const vpw = DEVICE_WIDTH[device];
 
   return (
@@ -361,11 +379,12 @@ export default function PageEditor({
           aria-label="Nom de la page"
         />
         <label className="flex items-center gap-1 text-xs text-faint">
-          /p/
+          {initialSlug === "faq" ? "/" : "/p/"}
           <input
             value={slug}
+            readOnly={initialSlug === "faq"}
             onChange={(e) => setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-"))}
-            className="w-36 rounded-lg border border-line bg-night px-3 py-1.5 text-xs focus:border-gold"
+            className="w-36 rounded-lg border border-line bg-night px-3 py-1.5 text-xs focus:border-gold read-only:opacity-70"
             aria-label="URL de la page"
           />
         </label>
@@ -393,18 +412,21 @@ export default function PageEditor({
           <span className={`rounded-full px-3 py-1 text-[11px] uppercase tracking-wide ${status === "published" ? "bg-gold/15 text-gold" : "bg-raised text-faint"}`}>
             {status === "published" ? "Publiée" : "Brouillon"}{dirty ? " •" : ""}
           </span>
-          <Link href={`/p/${slug}`} target="_blank" className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:text-ink">
+          <Link href={slug === "faq" ? "/faq" : `/p/${slug}`} target="_blank" className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:text-ink">
             Voir le site
           </Link>
+          <button onClick={previewDraft} disabled={saving} className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50">
+            Aperçu du brouillon
+          </button>
           <button onClick={() => doSave()} disabled={saving} className="rounded-full border border-gold px-4 py-1.5 text-xs text-gold hover:bg-gold/10">
             {saving ? "…" : "Enregistrer"}
           </button>
           <button
-            onClick={() => publish(status !== "published")}
+            onClick={() => publish(status !== "published" || hasUnpublishedChanges)}
             disabled={saving}
-            className={`rounded-full px-4 py-1.5 text-xs font-medium uppercase tracking-wide ${status === "published" ? "border border-line text-muted hover:text-ink" : "bg-gold text-night hover:bg-goldsoft"}`}
+            className={`rounded-full px-4 py-1.5 text-xs font-medium uppercase tracking-wide ${status === "published" && !hasUnpublishedChanges ? "border border-line text-muted hover:text-ink" : "bg-gold text-night hover:bg-goldsoft"}`}
           >
-            {status === "published" ? "Dépublier" : "Publier"}
+            {status === "published" ? hasUnpublishedChanges ? "Publier les modifications" : "Dépublier" : "Publier"}
           </button>
         </div>
       </div>
@@ -420,6 +442,7 @@ export default function PageEditor({
                 if (d.ok && d.data) {
                   setPage(d.data as CmsPage);
                   pushHistory(d.data as CmsPage);
+                  setDirty(true);
                   show("Version restaurée dans le brouillon.");
                 }
               }}
@@ -726,6 +749,12 @@ function PropsPanel({
 }) {
   const s = el.style ?? {};
   const c = el.content ?? {};
+  const faqItems = Array.isArray(c.items) ? (c.items as { question: string; answer: string }[]) : [];
+  const updateFaqItem = (index: number, patch: Partial<{ question: string; answer: string }>) => {
+    const next = [...faqItems];
+    next[index] = { ...next[index], ...patch };
+    onChangeContent({ items: next });
+  };
   const [pickerOpen, setPickerOpen] = useState(false);
   return (
     <div>
@@ -876,8 +905,33 @@ function PropsPanel({
           <Field label="Libellé"><Input v={c.label ?? ""} onChange={(v) => onChangeContent({ label: v })} /></Field>
         </>
       )}
-      {(el.type === "promo" || el.type === "newsletter" || el.type === "form" || el.type === "testimonials" || el.type === "faq") && (
-        <Field label="Texte principal"><Input v={c.text ?? c.title ?? ""} onChange={(v) => onChangeContent(el.type === "testimonials" || el.type === "faq" ? { title: v } : { text: v })} /></Field>
+      {(el.type === "promo" || el.type === "newsletter" || el.type === "form" || el.type === "testimonials") && (
+        <Field label="Texte principal"><Input v={c.text ?? c.title ?? ""} onChange={(v) => onChangeContent(el.type === "testimonials" ? { title: v } : { text: v })} /></Field>
+      )}
+      {el.type === "faq" && (
+        <>
+          <p className="mb-1.5 mt-2 text-[10px] tracking-[0.2em] text-faint uppercase">FAQ</p>
+          <Field label="Surtitre"><Input v={c.eyebrow ?? ""} onChange={(v) => onChangeContent({ eyebrow: v })} /></Field>
+          <Field label="Titre"><Input v={c.title ?? ""} onChange={(v) => onChangeContent({ title: v })} /></Field>
+          <div className="space-y-3">
+            {faqItems.map((item, index) => (
+              <div key={index} className="rounded-xl border border-line bg-night/50 p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[10px] tracking-wide text-gold uppercase">Question {index + 1}</span>
+                  <button type="button" onClick={() => onChangeContent({ items: faqItems.filter((_, i) => i !== index) })} className="text-[10px] text-danger hover:underline">Supprimer</button>
+                </div>
+                <Field label="Question"><textarea rows={2} className={`${inputCls} resize-y`} value={item.question ?? ""} onChange={(e) => updateFaqItem(index, { question: e.target.value })} /></Field>
+                <Field label="Réponse"><textarea rows={4} className={`${inputCls} resize-y`} value={item.answer ?? ""} onChange={(e) => updateFaqItem(index, { answer: e.target.value })} /></Field>
+              </div>
+            ))}
+          </div>
+          <button type="button" onClick={() => onChangeContent({ items: [...faqItems, { question: "", answer: "" }] })} className="w-full rounded-lg border border-dashed border-line px-3 py-2 text-xs text-muted hover:border-gold hover:text-ink">+ Ajouter une question</button>
+          <p className="mb-1.5 mt-4 text-[10px] tracking-[0.2em] text-faint uppercase">Bloc contact</p>
+          <Field label="Titre"><Input v={c.contactTitle ?? ""} onChange={(v) => onChangeContent({ contactTitle: v })} /></Field>
+          <Field label="Texte"><textarea rows={2} className={`${inputCls} resize-y`} value={c.contactText ?? ""} onChange={(e) => onChangeContent({ contactText: e.target.value })} /></Field>
+          <Field label="Libellé du lien"><Input v={c.contactLabel ?? ""} onChange={(v) => onChangeContent({ contactLabel: v })} /></Field>
+          <Field label="URL du lien"><Input v={c.contactHref ?? ""} onChange={(v) => onChangeContent({ contactHref: v })} /></Field>
+        </>
       )}
       {el.type === "divider" && (
         <div className="grid grid-cols-2 gap-2">

@@ -21,6 +21,7 @@ export default async function AdminEditorPage({ params }: { params: Promise<{ id
       initialName={page.name}
       initialSlug={page.slug}
       initialStatus={page.status}
+      initialPublished={(page.published as unknown as CmsPage | null) ?? null}
       templates={templates}
     />
   );

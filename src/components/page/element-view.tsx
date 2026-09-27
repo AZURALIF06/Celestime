@@ -232,22 +232,45 @@ export function ElementView({ el, products = [] }: { el: CmsElement; products?: 
             </div>
           </div>
         );
-      case "faq":
+      case "faq": {
+        const legacyItems = [
+          { question: "Que représente la carte du ciel ?", answer: "Les étoiles et les constellations visibles à la date, à l'heure et au lieu indiqués. Elle permet de garder un souvenir symbolique d'un moment important." },
+          { question: "Dois-je connaître l'heure exacte ?", answer: "L'heure exacte est recommandée. Sinon, vous pouvez indiquer une heure approximative, clairement signalée comme telle." },
+          { question: "Quels formats ?", answer: "A4 à A0, en medaillon ou en cœur, fond saphir, rubis ou émeraude, avec ou sans cadre." },
+        ];
+        const items = Array.isArray(c.items)
+          ? c.items.filter((item: unknown) => {
+              if (!item || typeof item !== "object") return false;
+              const entry = item as { question?: unknown; answer?: unknown };
+              return typeof entry.question === "string" && typeof entry.answer === "string";
+            }) as { question: string; answer: string }[]
+          : legacyItems;
         return (
-          <div className="h-full w-full space-y-2 overflow-auto">
-            <h3 className="mb-3 font-display text-2xl text-ink">{c.title ?? "Questions fréquentes"}</h3>
-            {[
-              ["Que représente la carte du ciel ?", "Les étoiles et les constellations visibles à la date, à l'heure et au lieu indiqués. Elle permet de garder un souvenir symbolique d'un moment important."],
-              ["Dois-je connaître l'heure exacte ?", "L'heure exacte est recommandée. Sinon, vous pouvez indiquer une heure approximative, clairement signalée comme telle."],
-              ["Quels formats ?", "A4 à A0, en medaillon ou en cœur, fond saphir, rubis ou émeraude, avec ou sans cadre."],
-            ].map(([q, a], i) => (
-              <details key={i} className="group rounded-xl border border-line bg-surface/50">
-                <summary className="flex cursor-pointer items-center justify-between gap-3 px-4 py-3 text-sm text-ink">{q}<span className="text-gold group-open:rotate-45">+</span></summary>
-                <p className="px-4 pb-3 text-sm text-muted">{a}</p>
+          <section className="w-full space-y-3">
+            {c.eyebrow && <p className="text-center text-[11px] tracking-[0.3em] text-gold uppercase">{c.eyebrow}</p>}
+            <h1 className="mb-8 text-center font-display text-5xl text-ink">{c.title ?? "Questions fréquentes"}</h1>
+            {items.map((item, i) => (
+              <details key={`${item.question}-${i}`} className="group rounded-xl border border-line bg-surface/50">
+                <summary className="flex cursor-pointer items-center justify-between gap-4 px-5 py-4 text-sm font-medium text-ink">
+                  {item.question}<span className="text-gold transition-transform duration-300 group-open:rotate-45">+</span>
+                </summary>
+                <p className="px-5 pb-5 text-sm leading-relaxed text-muted">{item.answer}</p>
               </details>
             ))}
-          </div>
+            {c.contactTitle && (
+              <div className="mt-12 rounded-2xl border border-line bg-surface/50 p-8 text-center">
+                <h2 className="font-display text-2xl text-ink">{c.contactTitle}</h2>
+                {c.contactText && <p className="mt-2 text-sm text-muted">{c.contactText}</p>}
+                {c.contactLabel && c.contactHref && (
+                  <Link href={c.contactHref} className="mt-5 inline-block rounded-full bg-gold px-7 py-3 text-sm font-medium tracking-[0.14em] text-night uppercase hover:bg-goldsoft">
+                    {c.contactLabel}
+                  </Link>
+                )}
+              </div>
+            )}
+          </section>
         );
+      }
       case "product": {
         const p = products.find((x) => x.slug === c.slug);
         if (!p) return <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-line text-xs text-faint">Produit introuvable</div>;

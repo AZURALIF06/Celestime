@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-27T16:18:35.683Z",
+  "generatedAt": "2026-09-27T16:27:10.623Z",
   "routes": [
     {
       "path": "/",
@@ -48,7 +48,15 @@
       "file": "src/app/admin/editeur/page.tsx",
       "kind": "admin",
       "sourceType": "administration",
-      "lastModified": "2026-09-27T16:18:35.683Z",
+      "lastModified": "2026-09-27T16:23:14+00:00",
+      "media": []
+    },
+    {
+      "path": "/admin/editeur/apercu/[id]",
+      "file": "src/app/admin/editeur/apercu/[id]/page.tsx",
+      "kind": "admin",
+      "sourceType": "administration",
+      "lastModified": "2026-09-27T16:27:10.623Z",
       "media": []
     },
     {
