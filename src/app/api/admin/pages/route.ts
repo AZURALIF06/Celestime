@@ -8,6 +8,7 @@ import { createBoutiqueCmsPage, hasBoutiqueProductBlocks } from "@/lib/boutique-
 import { createFaqCmsPage } from "@/lib/faq-cms";
 import { createCommentCaMarcheCmsPage, isValidCommentCaMarcheCmsPage } from "@/lib/comment-ca-marche-cms";
 import { createLivraisonCmsPage, isValidLivraisonCmsPage } from "@/lib/livraison-cms";
+import { createHomeCmsPage, isValidHomeCmsPage } from "@/lib/home-content";
 
 export const runtime = "nodejs";
 
@@ -134,10 +135,28 @@ export async function POST(req: Request) {
       await audit(g.email!, "page.connect_livraison", "livraison");
       return Response.json({ id, slug: "livraison", existing: false }, { status: 201 });
     }
+    case "connectHome": {
+      const existing = (await db.select().from(pages).where(eq(pages.slug, "accueil")))[0];
+      if (existing) return Response.json({ id: existing.id, slug: existing.slug, existing: true });
+
+      const id = crypto.randomUUID();
+      await db.insert(pages).values({
+        id,
+        slug: "accueil",
+        name: "Accueil",
+        status: "draft",
+        draft: createHomeCmsPage(),
+        published: null,
+        seo: { title: "Célestime — Cartes du ciel personnalisées", description: "", noindex: true },
+      });
+      await audit(g.email!, "page.connect_home", "accueil");
+      return Response.json({ id, slug: "accueil", existing: false }, { status: 201 });
+    }
     case "create": {
       if (!body.name || typeof body.name !== "string") return jsonError("Le nom de la page est requis.");
       let slug = slugify(body.slug || body.name);
       if (!slug) return jsonError("URL invalide.");
+      if (slug === "accueil") return jsonError("L’URL de la page d’accueil est réservée.");
       const existing = await db.select().from(pages).where(eq(pages.slug, slug));
       if (existing.length > 0) {
         let i = 2;
@@ -159,6 +178,12 @@ export async function POST(req: Request) {
     case "update": {
       const row = (await db.select().from(pages).where(eq(pages.id, body.id)))[0];
       if (!row) return jsonError("Page introuvable.", 404);
+      if (row.slug === "accueil") {
+        if (body.slug && slugify(body.slug) !== "accueil") return jsonError("L’URL de la page d’accueil est réservée.");
+        if (body.publish === true && !isValidHomeCmsPage(body.data ?? row.draft)) {
+          return jsonError("Le contenu éditorial de l’accueil est incomplet ou invalide ; la publication a été refusée.");
+        }
+      }
       if (row.slug === "livraison") {
         if (body.slug && slugify(body.slug) !== "livraison") return jsonError("L’URL de la page Livraison est réservée.");
         if (body.publish === true && !isValidLivraisonCmsPage(body.data ?? row.draft)) {
@@ -183,6 +208,7 @@ export async function POST(req: Request) {
       if (body.seo) patch.seo = body.seo;
       if (body.slug) {
         const slug = slugify(body.slug);
+        if (slug === "accueil" && row.slug !== "accueil") return jsonError("L’URL de la page d’accueil est réservée.");
         const taken = (await db.select().from(pages).where(eq(pages.slug, slug)))[0];
         if (taken && taken.id !== row.id) return jsonError("Cette URL est déjà utilisée.");
         patch.slug = slug;

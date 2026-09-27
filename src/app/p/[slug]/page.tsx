@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { db } from "@/db";
 import { pages } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -12,6 +12,7 @@ export const metadata: Metadata = { title: "Page Célestime" };
 
 export default async function CmsPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
+  if (slug === "accueil") redirect("/");
   const rows = await db.select().from(pages).where(eq(pages.slug, slug)).limit(1);
   const page = rows[0];
   if (!page || page.status !== "published" || !page.published) notFound();

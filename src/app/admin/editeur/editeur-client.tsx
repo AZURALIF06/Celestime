@@ -37,6 +37,7 @@ export default function SiteMapClient(initial: Props) {
   const [inspection, setInspection] = useState(initial);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [connectingHome, setConnectingHome] = useState(false);
   const [connectingFaq, setConnectingFaq] = useState(false);
   const [connectingBoutique, setConnectingBoutique] = useState(false);
   const [connectingCommentCaMarche, setConnectingCommentCaMarche] = useState(false);
@@ -44,7 +45,21 @@ export default function SiteMapClient(initial: Props) {
   const [actionError, setActionError] = useState<string | null>(null);
 
   const entries = useMemo(() => {
-    const routeEntries = inspection.routes.map((route) => {
+    const routes = inspection.routes.map((route) => ({
+      ...route,
+      path: `/${route.path.split("/").filter(Boolean).join("/")}`,
+    }));
+    if (!routes.some((route) => route.path === "/")) {
+      routes.unshift({
+        path: "/",
+        file: "src/app/page.tsx",
+        kind: "static",
+        sourceType: "code",
+        lastModified: null,
+        media: [],
+      });
+    }
+    const routeEntries = routes.map((route) => {
       const isAdmin = route.kind === "admin";
       const isBlog = route.path === "/blog" || route.path.startsWith("/blog/");
       const isCmsPattern = route.path === "/p/[slug]";
@@ -53,13 +68,29 @@ export default function SiteMapClient(initial: Props) {
       let status = isAdmin ? "Page administrative" : route.kind === "static" ? "Non connectée au CMS" : "Modèle de route";
       let href: string | null = isAdmin ? route.path : !dynamic ? route.path : null;
       let action = isAdmin ? "Ouvrir" : !dynamic ? "Voir la page" : null;
+      let connectHome = false;
       let connectFaq = false;
       let connectBoutique = false;
       let connectCommentCaMarche = false;
       let connectLivraison = false;
       let media = route.media;
 
-      if (route.path === "/faq") {
+      if (route.path === "/") {
+        const homePage = inspection.cmsPages.find((page) => page.slug === "accueil");
+        if (homePage) {
+          type = "Page éditoriale CMS";
+          status = homePage.status === "published" ? "Publiée via CMS" : "Brouillon — fallback public conservé";
+          href = homePage.editHref;
+          action = "Éditer";
+          media = homePage.media;
+        } else {
+          type = "Page éditoriale CMS";
+          status = "Fallback actuel — CMS à connecter";
+          href = null;
+          action = null;
+          connectHome = true;
+        }
+      } else if (route.path === "/faq") {
         const faqPage = inspection.cmsPages.find((page) => page.slug === "faq");
         if (faqPage) {
           type = "Page CMS";
@@ -149,6 +180,7 @@ export default function SiteMapClient(initial: Props) {
         action,
         media,
         admin: isAdmin,
+        connectHome,
         connectFaq,
         connectBoutique,
         connectCommentCaMarche,
@@ -157,7 +189,7 @@ export default function SiteMapClient(initial: Props) {
     });
 
     const cmsEntries = [
-      ...inspection.cmsPages.filter((page) => page.slug !== "faq" && page.slug !== "boutique" && page.slug !== "comment-ca-marche" && page.slug !== "livraison").map((page) => ({
+      ...inspection.cmsPages.filter((page) => page.slug !== "accueil" && page.slug !== "faq" && page.slug !== "boutique" && page.slug !== "comment-ca-marche" && page.slug !== "livraison").map((page) => ({
         key: `cms:${page.id}`,
         path: page.path,
         name: page.name,
@@ -168,6 +200,7 @@ export default function SiteMapClient(initial: Props) {
         action: "Éditer",
         media: page.media,
         admin: false,
+        connectHome: false,
         connectFaq: false,
         connectBoutique: false,
         connectCommentCaMarche: false,
@@ -184,6 +217,7 @@ export default function SiteMapClient(initial: Props) {
         action: "Gérer dans le blog",
         media: post.media,
         admin: false,
+        connectHome: false,
         connectFaq: false,
         connectBoutique: false,
         connectCommentCaMarche: false,
@@ -195,6 +229,25 @@ export default function SiteMapClient(initial: Props) {
       filter === "all" || (filter === "admin" ? entry.admin : !entry.admin)
     );
   }, [filter, inspection]);
+
+  async function connectHome() {
+    setConnectingHome(true);
+    setActionError(null);
+    try {
+      const response = await fetch("/api/admin/pages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "connectHome" }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.id) throw new Error(data.error ?? "La connexion de l’accueil au CMS a échoué.");
+      router.push(`/admin/editor/${data.id}`);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Erreur lors de la connexion de l’accueil.");
+    } finally {
+      setConnectingHome(false);
+    }
+  }
 
   async function connectFaq() {
     setConnectingFaq(true);
@@ -355,7 +408,11 @@ export default function SiteMapClient(initial: Props) {
                   <td className="px-4 py-3"><span className={`inline-block rounded-full px-2.5 py-1 text-[10px] ${entry.type.includes("CMS") || entry.type === "Page CMS" || entry.type === "Article CMS" ? "bg-emerald-900/30 text-emerald-200" : "bg-raised text-muted"}`}>{entry.status}</span></td>
                   <td className="px-4 py-3 text-xs text-muted">{formatDate(entry.date)}</td>
                   <td className="px-4 py-3 text-right">
-                    {entry.connectFaq ? (
+                    {entry.connectHome ? (
+                      <button onClick={connectHome} disabled={connectingHome} className="rounded-full bg-gold px-3 py-1.5 text-[11px] text-night hover:bg-goldsoft disabled:opacity-50">
+                        {connectingHome ? "Connexion…" : "Connecter au CMS"}
+                      </button>
+                    ) : entry.connectFaq ? (
                       <button onClick={connectFaq} disabled={connectingFaq} className="rounded-full bg-gold px-3 py-1.5 text-[11px] text-night hover:bg-goldsoft disabled:opacity-50">
                         {connectingFaq ? "Connexion…" : "Connecter au CMS"}
                       </button>

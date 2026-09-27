@@ -5,6 +5,7 @@ import { pages, pageTemplates } from "@/db/schema";
 import { requireAdmin } from "@/lib/auth";
 import { emptyPage, type CmsPage } from "@/lib/cms";
 import PageEditor from "@/components/admin/page-editor";
+import HomePageEditor from "@/components/admin/home-page-editor";
 
 export default async function AdminEditorPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -12,6 +13,9 @@ export default async function AdminEditorPage({ params }: { params: Promise<{ id
   const rows = await db.select().from(pages).where(eq(pages.id, id)).limit(1);
   const page = rows[0];
   if (!page) notFound();
+  if (page.slug === "accueil") {
+    return <HomePageEditor pageId={page.id} initialData={(page.draft as unknown as CmsPage) ?? emptyPage()} initialStatus={page.status} />;
+  }
   const templates = (await db.select().from(pageTemplates)).map((t) => ({ id: t.id, name: t.name }));
   const data = (page.draft as unknown as CmsPage) ?? emptyPage();
   return (
