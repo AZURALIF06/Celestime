@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { euro, inputCls, Field } from "@/components/admin/admin-ui";
 import MediaPicker from "@/components/admin/media-picker";
@@ -265,6 +265,48 @@ function ProductForm({
   const mainImage = product.images[0] ?? "";
   const gallery = product.images.slice(1);
 
+  // Upload direct depuis l'ordinateur (JPG/JPEG/PNG/WebP, 4 Mo max) — les
+  // octets partent dans media.data et l'URL /api/media/<id> est ajoutée au
+  // produit. La médiathèque (MediaPicker) reste disponible à côté.
+  const [uploading, setUploading] = useState<null | "main" | "gallery">(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const mainFileRef = useRef<HTMLInputElement>(null);
+  const galleryFileRef = useRef<HTMLInputElement>(null);
+
+  const uploadImages = async (files: FileList | null, target: "main" | "gallery") => {
+    if (!files || files.length === 0 || uploading) return;
+    setUploadError(null);
+    setUploading(target);
+    // On part de l'état le plus récent : les URLs sont ajoutées au fil des
+    // uploads pour que plusieurs fichiers se succèdent sans s'écraser.
+    const current = product.images.filter(Boolean);
+    const errors: string[] = [];
+    const list = target === "main" ? [files[0]] : Array.from(files);
+    for (const file of list) {
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch("/api/admin/products/upload-image", { method: "POST", body: fd });
+        const d = await res.json().catch(() => ({}));
+        if (res.status === 201 && typeof d.url === "string") {
+          if (target === "main") {
+            current[0] = d.url;
+          } else if (!current.includes(d.url)) {
+            current.push(d.url);
+          }
+          // Aperçu immédiat de la miniature dès réception de l'URL
+          set({ images: [...current] });
+        } else {
+          errors.push(`${file.name} : ${d.error ?? `échec de l'upload (${res.status})`}`);
+        }
+      } catch (e) {
+        errors.push(`${file.name} : ${e instanceof Error ? e.message : "erreur réseau"}`);
+      }
+    }
+    setUploading(null);
+    if (errors.length > 0) setUploadError(errors.join(" — "));
+  };
+
   const handlePickerSelect = (urls: string[]) => {
     if (pickerOpen === "main") {
       // Remplace l'image principale, garde galerie
@@ -308,8 +350,10 @@ function ProductForm({
 
       {/* Images — nouvelle médiathèque */}
       <div className="rounded-2xl border border-gold/20 bg-surface/60 p-5">
-        <h3 className="text-xs tracking-[0.2em] text-gold uppercase">Médiathèque — Images du produit</h3>
-        <p className="mt-1 text-xs text-muted">Utilisez la médiathèque persistante Vercel Blob. Anciennes images <code>/images/…</code> restent compatibles.</p>
+        <h3 className="text-xs tracking-[0.2em] text-gold uppercase">Images du produit</h3>
+        <p className="mt-1 text-xs text-muted">
+          Ajoutez une image directement depuis votre ordinateur (JPG, PNG ou WebP — 4&nbsp;Mo max, stockée dans la médiathèque) ou choisissez un visuel déjà présent dans la médiathèque. Anciennes images <code>/images/…</code> restent compatibles.
+        </p>
 
         {/* Image principale */}
         <div className="mt-4 grid gap-6 lg:grid-cols-[280px_1fr]">
@@ -325,10 +369,18 @@ function ProductForm({
               </div>
               <div className="mt-2 flex gap-2">
                 <button
-                  onClick={() => setPickerOpen("main")}
-                  className="flex-1 rounded-full bg-gold px-4 py-2 text-xs font-medium tracking-wide text-night uppercase hover:bg-goldsoft"
+                  onClick={() => mainFileRef.current?.click()}
+                  disabled={uploading !== null}
+                  className="flex-1 rounded-full bg-gold px-4 py-2 text-xs font-medium tracking-wide text-night uppercase hover:bg-goldsoft disabled:opacity-50"
                 >
-                  Choisir dans la médiathèque
+                  {uploading === "main" ? "Envoi en cours…" : "+ Ajouter une image"}
+                </button>
+                <button
+                  onClick={() => setPickerOpen("main")}
+                  disabled={uploading !== null}
+                  className="flex-1 rounded-full border border-line px-4 py-2 text-xs uppercase tracking-wide text-muted hover:text-ink disabled:opacity-50"
+                >
+                  Médiathèque
                 </button>
                 {mainImage && (
                   <button
@@ -354,11 +406,20 @@ function ProductForm({
                   <div className="py-10 text-center">
                     <p className="text-xs text-faint">Aucune image supplémentaire.</p>
                     <button
-                      onClick={() => setPickerOpen("gallery")}
-                      className="mt-3 rounded-full border border-line px-4 py-1.5 text-xs text-muted hover:text-ink"
+                      onClick={() => galleryFileRef.current?.click()}
+                      disabled={uploading !== null}
+                      className="mt-3 rounded-full bg-gold px-4 py-1.5 text-xs font-medium tracking-wide text-night uppercase hover:bg-goldsoft disabled:opacity-50"
                     >
-                      + Ajouter depuis médiathèque
+                      {uploading === "gallery" ? "Envoi en cours…" : "+ Ajouter une image"}
                     </button>
+                    <button
+                      onClick={() => setPickerOpen("gallery")}
+                      disabled={uploading !== null}
+                      className="mt-3 ml-2 rounded-full border border-line px-4 py-1.5 text-xs text-muted hover:text-ink disabled:opacity-50"
+                    >
+                      Médiathèque
+                    </button>
+                    <p className="mt-2 text-[11px] text-faint">Sélection multiple possible — JPG, PNG ou WebP, 4&nbsp;Mo max par image.</p>
                   </div>
                 ) : (
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -407,14 +468,30 @@ function ProductForm({
                       );
                     })}
                     <button
-                      onClick={() => setPickerOpen("gallery")}
-                      className="flex aspect-square items-center justify-center rounded-lg border border-dashed border-line bg-night/20 text-xs text-muted hover:border-gold hover:text-ink"
+                      onClick={() => galleryFileRef.current?.click()}
+                      disabled={uploading !== null}
+                      className="flex aspect-square flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-line bg-night/20 text-xs text-muted hover:border-gold hover:text-ink disabled:opacity-50"
+                      title="Ajouter une ou plusieurs images depuis votre ordinateur"
                     >
-                      + Ajouter
+                      <span className="text-base leading-none">{uploading === "gallery" ? "…" : "+"}</span>
+                      <span>{uploading === "gallery" ? "Envoi…" : "Ajouter une image"}</span>
+                    </button>
+                    <button
+                      onClick={() => setPickerOpen("gallery")}
+                      disabled={uploading !== null}
+                      className="flex aspect-square items-center justify-center rounded-lg border border-dashed border-line bg-night/20 text-xs text-muted hover:border-gold hover:text-ink disabled:opacity-50"
+                      title="Choisir des images déjà présentes dans la médiathèque"
+                    >
+                      Médiathèque
                     </button>
                   </div>
                 )}
               </div>
+              {uploadError && (
+                <p className="mt-2 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger" role="alert">
+                  {uploadError}
+                </p>
+              )}
               <p className="mt-2 text-[11px] text-faint">La première image est l&apos;image principale affichée sur le site public et le catalogue. Les suivantes sont la galerie.</p>
             </Field>
 
@@ -611,6 +688,31 @@ function ProductForm({
           {product.variants.length === 0 && <p className="text-sm text-faint">Aucune variante — le produit sera vendu au prix de base.</p>}
         </div>
       </div>
+
+      {/* Inputs file cachés — upload direct depuis l'ordinateur */}
+      <input
+        ref={mainFileRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+        className="hidden"
+        aria-hidden="true"
+        onChange={(e) => {
+          uploadImages(e.target.files, "main");
+          e.target.value = "";
+        }}
+      />
+      <input
+        ref={galleryFileRef}
+        type="file"
+        multiple
+        accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+        className="hidden"
+        aria-hidden="true"
+        onChange={(e) => {
+          uploadImages(e.target.files, "gallery");
+          e.target.value = "";
+        }}
+      />
 
       {/* Picker modal */}
       <MediaPicker
