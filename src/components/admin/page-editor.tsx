@@ -13,20 +13,95 @@ import {
   MIN_SIZE,
   PAGE_WIDTH,
   emptyPage,
+  countCmsNodes,
+  createCmsIdFactory,
+  duplicateCmsNode,
+  removeCmsNodeFromSection,
+  findCmsNode,
+  findCmsParentNode,
+  cmsAncestors,
+  createCmsGroupFromElements,
+  resizeCmsGroupToFrame,
+  moveCmsColumnChild,
+  isCmsContainer,
+  isCmsColumn,
+  isCmsGroup,
+  isCmsRow,
+  isCmsStructuralNode,
+  isCmsNodeEditable,
+  isValidGenericCmsPage,
   makeElement,
-  newId,
+  updateCmsNodeInSection,
+  type CmsColumn,
+  type CmsContainer,
   type CmsElement,
+  type CmsGroup,
+  type CmsNode,
   type CmsPage,
+  type CmsRow,
   type CmsSection,
+  type CmsSectionNode,
+  type CmsStructuralNode,
+  type LibraryItem,
 } from "@/lib/cms";
 import MediaPicker from "@/components/admin/media-picker";
+import { alignFrame, appendHistorySnapshot, canvasFitZoom, clampFrame, resizeFrame, screenDeltaToCanvas, snapFrame, type CanvasGuide } from "@/lib/cms-editor-canvas";
+import { CMS_STRUCTURE_LIMITS, cmsColumnRenderStyle, cmsContainerRenderStyle, cmsFlowLeafRenderStyle, cmsGroupRenderStyle, cmsLeafRenderStyle, cmsRowRenderStyle } from "@/lib/cms-structure";
+import {
+  applyCmsElementBreakpointPatch,
+  CMS_BREAKPOINT_WIDTH,
+  getCmsElementFontSizeInBreakpoint,
+  getCmsElementForBreakpoint,
+  getCmsElementFrameInBreakpoint,
+  resolveCmsElementForBreakpoint,
+  resolveCmsElementFrame,
+  toCmsBreakpointFramePatch,
+  type CmsBreakpoint,
+  type CmsBreakpointPatch,
+  type ResponsiveFrame,
+} from "@/lib/cms-responsive";
 
-type Device = "desktop" | "tablet" | "mobile";
-const DEVICE_WIDTH: Record<Device, number> = { desktop: PAGE_WIDTH, tablet: 768, mobile: 390 };
+type Device = CmsBreakpoint;
+const LIBRARY_CATEGORY_ORDER = ["Texte", "Média", "Contenu", "Structure", "E-commerce", "Navigation", "Marketing"];
+const SECTION_SELECTION_ID = "__cms_section_selection__";
+const PHASE3B_DISABLED_SLUGS = new Set(["accueil", "boutique", "faq", "livraison", "comment-ca-marche"]);
+
+type EditorLibraryEntry =
+  | { kind: "element"; item: LibraryItem }
+  | { kind: "row"; key: string; label: string; preset: number[] }
+  | { kind: "group" }
+  | { kind: "container" };
+
+const PHASE3B_LIBRARY_ENTRIES: EditorLibraryEntry[] = [
+  { kind: "row", key: "phase3b-row-1", label: "Ligne 1 colonne", preset: [100] },
+  { kind: "row", key: "phase3b-row-2", label: "Ligne 2 colonnes (50/50)", preset: [50, 50] },
+  { kind: "row", key: "phase3b-row-3", label: "Ligne 3 colonnes", preset: [100 / 3, 100 / 3, 100 / 3] },
+  { kind: "row", key: "phase3b-row-4", label: "Ligne 4 colonnes", preset: [25, 25, 25, 25] },
+  { kind: "group" },
+  { kind: "container" },
+  { kind: "row", key: "phase3b-row-2-30-70", label: "Ligne 2 colonnes (30/70)", preset: [30, 70] },
+  { kind: "row", key: "phase3b-row-2-70-30", label: "Ligne 2 colonnes (70/30)", preset: [70, 30] },
+];
+
+function normalizeColumnWidths(columns: CmsColumn[]): CmsColumn[] {
+  if (!columns.length) return columns;
+  const extraBudget = 100 - columns.length;
+  const weights = columns.map((column) => Math.max(0, column.width - 1));
+  const weightTotal = weights.reduce((sum, value) => sum + value, 0);
+  let assigned = 0;
+  return columns.map((column, index) => {
+    const width = index === columns.length - 1
+      ? 100 - assigned
+      : Math.round((1 + (weightTotal > 0 ? extraBudget * weights[index] / weightTotal : extraBudget / columns.length)) * 100) / 100;
+    assigned += width;
+    return { ...column, width };
+  });
+}
 
 interface Sel {
   sectionId: string;
   elId: string;
+  parentId?: string;
 }
 
 export default function PageEditor({
@@ -53,77 +128,106 @@ export default function PageEditor({
   const [status, setStatus] = useState(initialStatus);
   const [publishedSnapshot, setPublishedSnapshot] = useState<string | null>(initialPublished ? JSON.stringify(initialPublished) : null);
   const [sel, setSel] = useState<Sel | null>(null);
+  const [multiSel, setMultiSel] = useState<Sel[]>([]);
   const [device, setDevice] = useState<Device>("desktop");
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [history, setHistory] = useState<string[]>([JSON.stringify(initialData)]);
   const [histIdx, setHistIdx] = useState(0);
+  const historyRef = useRef(history);
+  const [zoom, setZoom] = useState(100);
+  const [showGrid, setShowGrid] = useState(false);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [guides, setGuides] = useState<CanvasGuide[]>([]);
+  const [guideSectionId, setGuideSectionId] = useState<string | null>(null);
+  const [spacePressed, setSpacePressed] = useState(false);
   const [clipboard, setClipboard] = useState<CmsElement[] | null>(null);
   const [versions, setVersions] = useState<{ id: number; label: string; createdAt: string }[]>([]);
   const [showVersions, setShowVersions] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<{ sectionId: string; elementId: string; kind: "element" | "faqItem"; itemIndex?: number } | null>(null);
   const [editingText, setEditingText] = useState<string | null>(null);
-  const dragRef = useRef<{ mode: "move" | "resize"; dir?: string; start: { x: number; y: number }; el: CmsElement; section: CmsSection } | null>(null);
-  const canvasRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ mode: "move" | "resize"; dir?: string; start: { x: number; y: number }; node: CmsNode; parentId?: string; section: CmsSection; moved: boolean; originalPage: CmsPage; members?: { id: string; frame: { x: number; y: number; w: number; h: number } }[] } | null>(null);
+  const sectionResizeRef = useRef<{ sectionId: string; startY: number; initialHeight: number; scale: number; moved: boolean; originalPage: CmsPage } | null>(null);
+  const panRef = useRef<{ startX: number; startY: number; scrollLeft: number; scrollTop: number } | null>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const scaleRef = useRef(1);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pageRef = useRef(page);
+  const histIdxRef = useRef(histIdx);
+  const editRevision = useRef(0);
 
   const show = useCallback((m: string) => {
     setToast(m);
     setTimeout(() => setToast(null), 3200);
   }, []);
 
-  const pushHistory = useCallback(
-    (data: CmsPage) => {
-      setHistory((h) => {
-        const next = [...h.slice(0, histIdx + 1), JSON.stringify(data)].slice(-50);
-        setHistIdx(next.length - 1);
-        return next;
-      });
-    },
-    [histIdx]
-  );
+  const pushHistory = useCallback((data: CmsPage) => {
+    const result = appendHistorySnapshot(historyRef.current, histIdxRef.current, JSON.stringify(data), 50);
+    if (!result.changed) return;
+    historyRef.current = result.history;
+    setHistory(result.history);
+    histIdxRef.current = result.index;
+    setHistIdx(result.index);
+  }, []);
 
-  const update = useCallback(
-    (fn: (p: CmsPage) => CmsPage) => {
-      setPage((p) => {
-        const next = fn(p);
-        pushHistory(next);
-        return next;
-      });
-      setDirty(true);
-      scheduleSave();
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [pushHistory]
-  );
+  const update = useCallback((fn: (p: CmsPage) => CmsPage) => {
+    const current = pageRef.current;
+    const next = fn(current);
+    if (JSON.stringify(current) === JSON.stringify(next)) return;
+    pageRef.current = next;
+    editRevision.current += 1;
+    setPage(next);
+    pushHistory(next);
+    setDirty(true);
+  }, [pushHistory]);
 
-  const api = (body: Record<string, unknown>) =>
-    fetch("/api/admin/pages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: pageId, ...body }) }).then((r) => r.json());
+  const api = useCallback((body: Record<string, unknown>) =>
+    fetch("/api/admin/pages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: pageId, ...body }) }).then((r) => r.json()), [pageId]);
 
   const doSave = useCallback(
     async (extra: Record<string, unknown> = {}): Promise<boolean> => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+      const savingRevision = editRevision.current;
+      const savingPage = page;
       setSaving(true);
       try {
-        const result = await api({ action: "update", name, slug, data: page, ...extra });
+        const result = await api({ action: "update", name, slug, data: savingPage, ...extra });
         if (result.error) throw new Error(result.error);
-        setDirty(false);
+        if (editRevision.current === savingRevision) setDirty(false);
         const v = await fetch(`/api/admin/pages?id=${pageId}&full=1`).then((r) => r.json()).catch(() => null);
         if (v) setStatus(v.status ?? status);
+        show("Brouillon enregistré.");
         return true;
-      } catch {
-        show("Échec de l'enregistrement.");
+      } catch (error) {
+        show(error instanceof Error ? error.message : "Échec de l'enregistrement.");
         return false;
       } finally {
         setSaving(false);
       }
     },
-    [api, name, page, pageId, show, status]
+    [api, name, page, pageId, show, slug, status]
   );
 
-  const scheduleSave = useCallback(() => {
+  useEffect(() => {
+    pageRef.current = page;
+    histIdxRef.current = histIdx;
+    historyRef.current = history;
+  }, [page, histIdx, history]);
+
+  useEffect(() => {
+    if (!dirty) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => doSave(), 1800);
-  }, [doSave]);
+    saveTimer.current = setTimeout(() => {
+      saveTimer.current = null;
+      void doSave();
+    }, 1800);
+    return () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    };
+  }, [page, dirty, doSave]);
 
   useEffect(() => {
     const loadVersions = () => api({ action: "versions" }).then((d) => setVersions(d.versions ?? [])).catch(() => {});
@@ -136,40 +240,64 @@ export default function PageEditor({
 
   // --- Historique ---
   const undo = () => {
-    if (histIdx <= 0) return;
-    const data = JSON.parse(history[histIdx - 1]) as CmsPage;
-    setHistIdx(histIdx - 1);
+    const index = histIdxRef.current;
+    const entries = historyRef.current;
+    if (index <= 0) return;
+    const nextIndex = index - 1;
+    const data = JSON.parse(entries[nextIndex]) as CmsPage;
+    editRevision.current += 1;
+    histIdxRef.current = nextIndex;
+    pageRef.current = data;
+    setHistIdx(nextIndex);
     setPage(data);
     setDirty(true);
-    scheduleSave();
   };
   const redo = () => {
-    if (histIdx >= history.length - 1) return;
-    const data = JSON.parse(history[histIdx + 1]) as CmsPage;
-    setHistIdx(histIdx + 1);
+    const index = histIdxRef.current;
+    const entries = historyRef.current;
+    if (index >= entries.length - 1) return;
+    const nextIndex = index + 1;
+    const data = JSON.parse(entries[nextIndex]) as CmsPage;
+    editRevision.current += 1;
+    histIdxRef.current = nextIndex;
+    pageRef.current = data;
+    setHistIdx(nextIndex);
     setPage(data);
     setDirty(true);
-    scheduleSave();
   };
 
   // --- Sections ---
-  const addSection = () =>
+  const addSection = () => {
+    const id = createCmsIdFactory(pageRef.current)();
     update((p) => ({
-      sections: [...p.sections, { id: newId(), h: 480, bg: "linear-gradient(180deg,#06070c 0%,#0c0e16 100%)", elements: [] }],
+      sections: [...p.sections, { id, h: 480, bg: "linear-gradient(180deg,#06070c 0%,#0c0e16 100%)", elements: [] }],
     }));
+    setMultiSel([]);
+    setSel({ sectionId: id, elId: SECTION_SELECTION_ID });
+  };
   const sectionProp = (id: string, patch: Partial<CmsSection>) =>
     update((p) => ({ sections: p.sections.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
   const removeSection = (id: string) => {
+    if (pageRef.current.sections.length <= 1) { show("Une page doit conserver au moins une section."); return; }
+    const section = pageRef.current.sections.find((item) => item.id === id);
+    if (section?.elements.some((element) => element.locked ||
+      ((isCmsContainer(element) || isCmsGroup(element)) && element.children.some((child) => child.locked)) ||
+      (isCmsRow(element) && element.children.some((column) => column.locked || column.children.some((child) => child.locked))))) {
+      show("Déverrouillez les éléments verrouillés avant de supprimer cette section.");
+      return;
+    }
     if (!confirm("Supprimer cette section et tous ses éléments ?")) return;
     update((p) => ({ sections: p.sections.filter((s) => s.id !== id) }));
+    if (sel?.sectionId === id) { setSel(null); setMultiSel([]); }
   };
   const duplicateSection = (id: string) =>
     update((p) => {
       const i = p.sections.findIndex((s) => s.id === id);
       const src = p.sections[i];
       const copy: CmsSection = JSON.parse(JSON.stringify(src));
-      copy.id = newId();
-      copy.elements = copy.elements.map((e) => ({ ...e, id: newId() }));
+      const createId = createCmsIdFactory(p);
+      copy.id = createId();
+      copy.elements = copy.elements.map((node) => duplicateCmsNode(node, createId) as CmsSectionNode);
       const next = [...p.sections];
       next.splice(i + 1, 0, copy);
       return { sections: next };
@@ -186,44 +314,298 @@ export default function PageEditor({
 
   // --- Éléments ---
   const selSection = sel ? page.sections.find((s) => s.id === sel.sectionId) : null;
-  const selEl = sel && selSection ? selSection.elements.find((e) => e.id === sel.elId) : null;
-
-  const addElement = (type: string, sectionId?: string, x?: number, y?: number) => {
-    if (initialSlug === "boutique" && (type === "product" || type === "productGrid")) return;
-    const item = LIBRARY.find((l) => l.type === type && l.label.length > 0) ?? LIBRARY.find((l) => l.type === type)!;
-    const item2 = LIBRARY.find((l) => l.label === item.label && l.type === type) ?? item;
-    void item2;
-    const targetSectionId = sectionId ?? page.sections[page.sections.length - 1]?.id;
-    if (!targetSectionId) return;
-    const el = makeElement(item, x, y, (selSection?.elements.length ?? 0) + 1);
-    update((p) => ({
-      sections: p.sections.map((s) => (s.id === targetSectionId ? { ...s, elements: [...s.elements, el] } : s)),
-    }));
-    setSel({ sectionId: targetSectionId, elId: el.id });
+  const selIsSection = sel?.elId === SECTION_SELECTION_ID;
+  const selNode = sel && selSection && !selIsSection ? findCmsNode(selSection, sel.elId) : null;
+  const selContainer = selNode && isCmsContainer(selNode) ? selNode : null;
+  const selRow = selNode && isCmsRow(selNode) ? selNode : null;
+  const selColumn = selNode && isCmsColumn(selNode) ? selNode : null;
+  const selGroup = selNode && isCmsGroup(selNode) ? selNode : null;
+  const selParent = sel && selSection ? findCmsParentNode(selSection, sel.elId) : undefined;
+  const selEl = selNode && !isCmsStructuralNode(selNode) ? selNode : null;
+  const selReadOnly = !!selNode?.locked || !!(selSection && sel ? cmsAncestors(selSection, sel.elId).some((parent) => parent.locked) : false);
+  const activeMulti = multiSel.length > 1 && multiSel.every((item) => item.sectionId === sel?.sectionId) ? multiSel : [];
+  const activeMultiElements = selSection ? activeMulti.flatMap((item) => {
+    const node = findCmsNode(selSection, item.elId);
+    return node && !isCmsStructuralNode(node) ? [node] : [];
+  }) : [];
+  const selectNode = (selection: Sel, event?: React.MouseEvent, multiEligible = false) => {
+    const modified = !!event && (event.metaKey || event.ctrlKey);
+    if (modified && multiEligible) {
+      const existing = multiSel.length ? multiSel : (sel && sel.sectionId === selection.sectionId && !sel.parentId ? [sel] : []);
+      const alreadySelected = existing.some((item) => item.elId === selection.elId);
+      const next = alreadySelected ? existing.filter((item) => item.elId !== selection.elId) : [...existing.filter((item) => item.elId !== selection.elId), selection];
+      setMultiSel(next.length > 1 ? next : []);
+      setSel(next[next.length - 1] ?? null);
+      setEditingText(null);
+      return true;
+    }
+    setMultiSel([]);
+    setSel(selection);
+    setEditingText(null);
+    return false;
+  };
+  const selectSection = (sectionId: string) => {
+    setMultiSel([]);
+    setSel({ sectionId, elId: SECTION_SELECTION_ID });
+    setEditingText(null);
   };
 
-  const setEl = (sectionId: string, elId: string, patch: Partial<CmsElement>) =>
-    update((p) => ({
-      sections: p.sections.map((s) =>
-        s.id === sectionId ? { ...s, elements: s.elements.map((e) => (e.id === elId ? { ...e, ...patch } : e)) } : s
-      ),
-    }));
+  const addContainer = (sectionId?: string) => {
+    if (PHASE3B_DISABLED_SLUGS.has(initialSlug)) return;
+    if (device !== "desktop") { show("Les conteneurs de cette phase sont éditables sur Desktop uniquement."); return; }
+    const targetSectionId = sectionId ?? selSection?.id ?? page.sections[page.sections.length - 1]?.id;
+    const target = pageRef.current.sections.find((section) => section.id === targetSectionId);
+    if (!target || target.elements.length >= CMS_STRUCTURE_LIMITS.elementsPerSection || target.elements.filter(isCmsContainer).length >= CMS_STRUCTURE_LIMITS.containersPerSection || countCmsNodes(pageRef.current) >= CMS_STRUCTURE_LIMITS.totalNodesPerPage) { show("Limite de conteneurs ou de nœuds atteinte pour cette page."); return; }
+    const createId = createCmsIdFactory(pageRef.current);
+    const container: CmsContainer = {
+      id: createId(), nodeType: "container", x: 80, y: 80, w: 480, h: 300,
+      z: Math.max(0, ...target.elements.map((node) => node.z)) + 1, rotation: 0, opacity: 1,
+      layout: "free", children: [],
+    };
+    update((p) => ({ sections: p.sections.map((section) => section.id === targetSectionId ? { ...section, elements: [...section.elements, container] } : section) }));
+    setSel({ sectionId: targetSectionId, elId: container.id });
+  };
 
-  const removeEl = (sectionId: string, elId: string) => {
-    if (!confirm("Supprimer cet élément ? (Ctrl+Z pour annuler)")) return;
-    update((p) => ({ sections: p.sections.map((s) => (s.id === sectionId ? { ...s, elements: s.elements.filter((e) => e.id !== elId) } : s)) }));
+  const addRow = (preset: number[]) => {
+    if (PHASE3B_DISABLED_SLUGS.has(initialSlug)) return;
+    if (device !== "desktop") { show("Les rangées et colonnes structurelles sont éditables sur Desktop uniquement."); return; }
+    const targetSectionId = selSection?.id ?? page.sections[page.sections.length - 1]?.id;
+    const target = pageRef.current.sections.find((section) => section.id === targetSectionId);
+    if (!target || target.elements.length >= CMS_STRUCTURE_LIMITS.elementsPerSection || countCmsNodes(pageRef.current) + preset.length + 1 > CMS_STRUCTURE_LIMITS.totalNodesPerPage || target.elements.filter(isCmsRow).length >= CMS_STRUCTURE_LIMITS.rowsPerSection) {
+      show("Limite de rangées ou de nœuds atteinte."); return;
+    }
+    const createId = createCmsIdFactory(pageRef.current);
+    const row: CmsRow = {
+      id: createId(), nodeType: "row", x: 80, y: 80, w: 1040, h: 320,
+      z: Math.max(0, ...target.elements.map((node) => node.z)) + 1, rotation: 0, opacity: 1,
+      layout: "horizontal", gap: 16, alignX: "start", alignY: "start",
+      children: preset.map((width) => ({
+        id: createId(), nodeType: "column", width, z: 1, opacity: 1, layout: "vertical", gap: 16, children: [],
+      })),
+    };
+    update((p) => ({ sections: p.sections.map((section) => section.id === targetSectionId ? { ...section, elements: [...section.elements, row] } : section) }));
+    setMultiSel([]);
+    setSel({ sectionId: targetSectionId, elId: row.id });
+  };
+
+  const groupSelection = () => {
+    if (device !== "desktop" || activeMulti.length < 2 || !selSection) return;
+    const ids = new Set(activeMulti.map((item) => item.elId));
+    const nodes = activeMulti.map((item) => findCmsNode(selSection, item.elId));
+    if (nodes.length > CMS_STRUCTURE_LIMITS.childrenPerGroup || nodes.some((node) => !node || isCmsStructuralNode(node) || node.locked) ||
+      selSection.elements.filter(isCmsGroup).length >= CMS_STRUCTURE_LIMITS.groupsPerSection ||
+      countCmsNodes(pageRef.current) + 1 > CMS_STRUCTURE_LIMITS.totalNodesPerPage) {
+      show("Seules plusieurs feuilles racines modifiables peuvent être regroupées."); return;
+    }
+    const rootNodes = nodes as CmsElement[];
+    const ordered = [...selSection.elements].sort((a, b) => a.z - b.z);
+    const selectedPositions = ordered.flatMap((node, index) => ids.has(node.id) ? [index] : []);
+    if (selectedPositions.length !== rootNodes.length || Math.max(...selectedPositions) - Math.min(...selectedPositions) + 1 !== selectedPositions.length) {
+      show("Pour préserver l’empilement visuel, regroupez des feuilles contiguës dans les calques."); return;
+    }
+    const group = createCmsGroupFromElements(rootNodes, createCmsIdFactory(pageRef.current)());
+    update((p) => ({ sections: p.sections.map((section) => section.id === selSection.id
+      ? { ...section, elements: [...section.elements.filter((node) => !ids.has(node.id)), group] } : section) }));
+    setMultiSel([]);
+    setSel({ sectionId: selSection.id, elId: group.id });
+  };
+
+  const applyMultiPatch = (patch: Partial<CmsElement>) => {
+    if (activeMulti.length < 2 || !selSection) return;
+    const ids = new Set(activeMulti.map((item) => item.elId));
+    update((p) => ({ sections: p.sections.map((section) => section.id === selSection.id ? {
+      ...section,
+      elements: section.elements.map((node) => !isCmsStructuralNode(node) && ids.has(node.id) ? { ...node, ...patch } : node),
+    } : section) }));
+  };
+
+  const duplicateMulti = () => {
+    if (activeMulti.length < 2 || !selSection) return;
+    if (activeMultiElements.some((element) => element.locked)) { show("Déverrouillez les éléments verrouillés avant de les dupliquer."); return; }
+    if (selSection.elements.length + activeMulti.length > CMS_STRUCTURE_LIMITS.elementsPerSection || countCmsNodes(pageRef.current) + activeMulti.length > CMS_STRUCTURE_LIMITS.totalNodesPerPage) { show("La duplication dépasserait une limite de nœuds ou de feuilles."); return; }
+    const createId = createCmsIdFactory(pageRef.current);
+    const copies = activeMulti.map(({ elId }) => {
+      const source = findCmsNode(selSection, elId);
+      if (!source || isCmsStructuralNode(source)) return null;
+      const copy: CmsElement = { ...source, id: createId(), x: source.x + 24, y: source.y + 24, z: source.z + 1 };
+      if (source.responsive) {
+        copy.responsive = { ...source.responsive };
+        for (const breakpoint of ["tablet", "mobile"] as const) {
+          const override = source.responsive[breakpoint];
+          if (!override) continue;
+          const scale = CMS_BREAKPOINT_WIDTH[breakpoint] / PAGE_WIDTH;
+          copy.responsive[breakpoint] = { ...override,
+            ...(override.x !== undefined ? { x: override.x + 24 * scale } : {}),
+            ...(override.y !== undefined ? { y: override.y + 24 * scale } : {}),
+          };
+        }
+      }
+      return copy;
+    }).filter((node): node is CmsElement => !!node);
+    update((p) => ({ sections: p.sections.map((section) => section.id === selSection.id ? { ...section, elements: [...section.elements, ...copies] } : section) }));
+    setMultiSel([]);
+    setSel(copies[0] ? { sectionId: selSection.id, elId: copies[0].id } : null);
+  };
+
+  const removeMulti = () => {
+    if (activeMulti.length < 2 || !selSection) return;
+    if (activeMultiElements.some((element) => element.locked)) { show("Déverrouillez les éléments verrouillés avant de les supprimer."); return; }
+    if (!confirm(`Supprimer ces ${activeMulti.length} éléments ?`)) return;
+    const ids = new Set(activeMulti.map((item) => item.elId));
+    update((p) => ({ sections: p.sections.map((section) => section.id === selSection.id ? { ...section, elements: section.elements.filter((node) => !ids.has(node.id)) } : section) }));
+    setMultiSel([]);
     setSel(null);
   };
 
-  const duplicateEl = (sectionId: string, elId: string) =>
-    update((p) => ({
-      sections: p.sections.map((s) => {
-        if (s.id !== sectionId) return s;
-        const src = s.elements.find((e) => e.id === elId)!;
-        const copy = { ...JSON.parse(JSON.stringify(src)) as CmsElement, id: newId(), x: src.x + 24, y: src.y + 24, z: (src.z || 0) + 1 };
-        return { ...s, elements: [...s.elements, copy] };
-      }),
+  const addElement = (itemOrType: LibraryItem | string, sectionId?: string, x?: number, y?: number) => {
+    const item = typeof itemOrType === "string" ? LIBRARY.find((entry) => entry.type === itemOrType) : itemOrType;
+    if (!item || (initialSlug === "boutique" && (item.type === "product" || item.type === "productGrid"))) return;
+    const targetSectionId = sectionId ?? selSection?.id ?? page.sections[page.sections.length - 1]?.id;
+    if (!targetSectionId) return;
+    const selectedColumn = selColumn && sel?.sectionId === targetSectionId ? selColumn : null;
+    const selectedContainer = selContainer && sel?.sectionId === targetSectionId ? selContainer : null;
+    const targetParent = selectedColumn ?? selectedContainer;
+    const targetSection = pageRef.current.sections.find((section) => section.id === targetSectionId);
+    if (!targetSection || (!targetParent && targetSection.elements.length >= CMS_STRUCTURE_LIMITS.elementsPerSection)) { show("La limite de feuilles de cette section est atteinte."); return; }
+    if (targetParent && !isCmsNodeEditable(pageRef.current.sections.find((section) => section.id === targetSectionId)!, targetParent.id)) { show("Déverrouillez les parents avant d’ajouter un élément."); return; }
+    if (targetParent && targetParent.children.length >= (selectedColumn ? CMS_STRUCTURE_LIMITS.childrenPerColumn : CMS_STRUCTURE_LIMITS.childrenPerContainer)) { show("La limite d’enfants de cette structure est atteinte."); return; }
+    if (targetParent && countCmsNodes(pageRef.current) >= CMS_STRUCTURE_LIMITS.totalNodesPerPage) { show("La limite totale de nœuds est atteinte."); return; }
+    if (targetParent && device !== "desktop") { show("Le contenu structurel s’édite sur Desktop uniquement."); return; }
+    const el = makeElement(item,
+      selectedColumn ? 0 : x ?? (selectedContainer ? 24 : undefined),
+      selectedColumn ? 0 : y ?? (selectedContainer ? 24 : undefined),
+      targetParent ? targetParent.children.length + 1 : (selSection?.elements.length ?? 0) + 1);
+    el.id = createCmsIdFactory(pageRef.current)();
+    if (!isValidGenericCmsPage({ sections: [{ id: "structure-child-check", h: 1, elements: [el] }] })) {
+      show("Ce bloc n’est pas autorisé comme feuille de page générique.");
+      return;
+    }
+    if (selectedColumn) {
+      const currentSection = pageRef.current.sections.find((section) => section.id === targetSectionId)!;
+      const row = findCmsParentNode(currentSection, selectedColumn.id);
+      if (!row || !isCmsRow(row)) return;
+      update((p) => ({ sections: p.sections.map((section) => updateCmsNodeInSection(section, row.id, (node) => isCmsRow(node) ? {
+        ...node, children: node.children.map((column) => column.id === selectedColumn.id ? { ...column, children: [...column.children, el] } : column),
+      } : node)) }));
+      setSel({ sectionId: targetSectionId, elId: el.id, parentId: selectedColumn.id });
+    } else if (selectedContainer) {
+      update((p) => ({ sections: p.sections.map((section) => updateCmsNodeInSection(section, selectedContainer.id, (node) => isCmsContainer(node) ? { ...node, children: [...node.children, el] } : node)) }));
+      setSel({ sectionId: targetSectionId, elId: el.id, parentId: selectedContainer.id });
+    } else {
+      update((p) => ({ sections: p.sections.map((section) => section.id === targetSectionId ? { ...section, elements: [...section.elements, el] } : section) }));
+      setSel({ sectionId: targetSectionId, elId: el.id });
+    }
+    setMultiSel([]);
+  };
+
+  const setEl = (sectionId: string, elId: string, patch: Partial<CmsElement>) => {
+    const section = pageRef.current.sections.find((candidate) => candidate.id === sectionId);
+    const target = section && findCmsNode(section, elId);
+    if (!section || !target || isCmsStructuralNode(target) || !isCmsNodeEditable(section, elId)) return;
+    update((p) => ({ sections: p.sections.map((item) => item.id === sectionId ? updateCmsNodeInSection(item, elId, (node) => !isCmsStructuralNode(node) ? { ...node, ...patch } : node) : item) }));
+  };
+
+  const setStructure = (sectionId: string, nodeId: string, patch: Partial<CmsContainer> | Partial<CmsRow> | Partial<CmsColumn> | Partial<CmsGroup>) => {
+    const section = pageRef.current.sections.find((candidate) => candidate.id === sectionId);
+    const target = section && findCmsNode(section, nodeId);
+    const unlocking = patch.locked === false && Object.keys(patch).length === 1;
+    if (!section || !target || !isCmsStructuralNode(target) || (target.locked && !unlocking) || cmsAncestors(section, nodeId).some((parent) => parent.locked)) return;
+    update((p) => ({ sections: p.sections.map((item) => item.id === sectionId ? updateCmsNodeInSection(item, nodeId, (node) => {
+      if (!isCmsStructuralNode(node)) return node;
+      if (isCmsGroup(node) && (("w" in patch && patch.w !== undefined) || ("h" in patch && patch.h !== undefined))) return resizeCmsGroupToFrame(node, { x: node.x, y: node.y, w: Math.max(MIN_SIZE, "w" in patch ? patch.w ?? node.w : node.w), h: Math.max(MIN_SIZE, "h" in patch ? patch.h ?? node.h : node.h) });
+      return { ...node, ...patch } as CmsStructuralNode;
+    }) : item) }));
+  };
+  const setContainer = (sectionId: string, containerId: string, patch: Partial<CmsContainer>) => setStructure(sectionId, containerId, patch);
+
+  const setColumnWidth = (sectionId: string, rowId: string, columnId: string, requested: number) => {
+    const section = pageRef.current.sections.find((candidate) => candidate.id === sectionId);
+    const row = section && findCmsNode(section, rowId);
+    if (!section || !row || !isCmsRow(row) || !isCmsNodeEditable(section, columnId)) return;
+    const others = row.children.filter((column) => column.id !== columnId);
+    const maxWidth = 100 - others.length;
+    const value = Math.min(maxWidth, Math.max(1, Number.isFinite(requested) ? requested : 1));
+    const oldOtherTotal = others.reduce((sum, column) => sum + column.width, 0);
+    const remaining = maxWidth + others.length - value;
+    const shouldRedistribute = others.length > 0 && value + oldOtherTotal > 100;
+    let assigned = 0;
+    const widths = new Map(others.map((column, index) => {
+      const nextWidth = shouldRedistribute
+        ? index === others.length - 1 ? remaining - assigned : Math.round(remaining / others.length * 100) / 100
+        : column.width;
+      assigned += nextWidth;
+      return [column.id, nextWidth];
     }));
+    update((p) => ({ sections: p.sections.map((item) => item.id === sectionId ? updateCmsNodeInSection(item, rowId, (node) => isCmsRow(node) ? {
+      ...node, children: node.children.map((column) => column.id === columnId ? { ...column, width: value } : { ...column, width: widths.get(column.id) ?? column.width }),
+    } : node) : item) }));
+  };
+
+  const reorderColumnChild = (sectionId: string, rowId: string, columnId: string, childId: string, direction: -1 | 1) => {
+    const section = pageRef.current.sections.find((candidate) => candidate.id === sectionId);
+    const row = section && findCmsNode(section, rowId);
+    if (!section || !row || !isCmsRow(row) || !isCmsNodeEditable(section, childId)) return;
+    update((p) => ({ sections: p.sections.map((item) => item.id === sectionId ? updateCmsNodeInSection(item, rowId, (node) => isCmsRow(node) ? {
+      ...node, children: node.children.map((column) => column.id === columnId ? moveCmsColumnChild(column, childId, direction) : column),
+    } : node) : item) }));
+  };
+
+  const setElAtBreakpoint = (sectionId: string, elId: string, breakpoint: Device, patch: CmsBreakpointPatch) => {
+    const section = pageRef.current.sections.find((candidate) => candidate.id === sectionId);
+    const target = section && findCmsNode(section, elId);
+    if (!section || !target || isCmsStructuralNode(target) || !isCmsNodeEditable(section, elId)) return;
+    const nextElement = applyCmsElementBreakpointPatch(target, breakpoint, patch);
+    update((pageData) => ({ sections: pageData.sections.map((item) => item.id === sectionId ? updateCmsNodeInSection(item, elId, () => nextElement) : item) }));
+  };
+  const setElAtDevice = (sectionId: string, elId: string, patch: CmsBreakpointPatch) => setElAtBreakpoint(sectionId, elId, device, patch);
+
+  const removeEl = (sectionId: string, elId: string) => {
+    const section = pageRef.current.sections.find((item) => item.id === sectionId);
+    const node = section && findCmsNode(section, elId);
+    if (!section || !node || !isCmsNodeEditable(section, elId)) return;
+    const label = isCmsRow(node) ? "rangée et toutes ses colonnes / feuilles" : isCmsGroup(node) ? "groupe et toutes ses feuilles" : isCmsContainer(node) ? "conteneur et tous ses éléments" : isCmsColumn(node) ? "colonne et ses feuilles" : "élément";
+    if (!confirm(`Supprimer ${label} ?`)) return;
+    update((p) => ({ sections: p.sections.map((item) => item.id === sectionId ? removeCmsNodeFromSection(item, elId) : item) }));
+    setMultiSel([]);
+    setSel(null);
+  };
+
+  const duplicateEl = (sectionId: string, elId: string) => {
+    const section = pageRef.current.sections.find((item) => item.id === sectionId);
+    const src = section && findCmsNode(section, elId);
+    if (!section || !src || !isCmsNodeEditable(section, elId)) return;
+    const parent = findCmsParentNode(section, elId);
+    const copyCost = isCmsRow(src) ? 1 + src.children.reduce((sum, column) => sum + 1 + column.children.length, 0)
+      : (isCmsContainer(src) || isCmsGroup(src)) ? 1 + src.children.length : isCmsColumn(src) ? 1 + src.children.length : 1;
+    if (countCmsNodes(pageRef.current) + copyCost > CMS_STRUCTURE_LIMITS.totalNodesPerPage) { show("La duplication dépasserait la limite totale de nœuds."); return; }
+    if (isCmsContainer(src) && section.elements.filter(isCmsContainer).length >= CMS_STRUCTURE_LIMITS.containersPerSection) { show("Limite de conteneurs atteinte."); return; }
+    if (isCmsRow(src) && section.elements.filter(isCmsRow).length >= CMS_STRUCTURE_LIMITS.rowsPerSection) { show("Limite de rangées atteinte."); return; }
+    if (isCmsGroup(src) && section.elements.filter(isCmsGroup).length >= CMS_STRUCTURE_LIMITS.groupsPerSection) { show("Limite de groupes atteinte."); return; }
+    if (!parent && section.elements.length >= CMS_STRUCTURE_LIMITS.elementsPerSection) { show("La limite de feuilles de cette section est atteinte."); return; }
+    if (isCmsColumn(src) && (!parent || !isCmsRow(parent) || parent.children.length >= CMS_STRUCTURE_LIMITS.columnsPerRow)) { show("Cette rangée a déjà quatre colonnes."); return; }
+    if (parent && (isCmsContainer(parent) || isCmsGroup(parent)) && parent.children.length >= CMS_STRUCTURE_LIMITS.childrenPerContainer) { show("La limite d’enfants de cette structure est atteinte."); return; }
+    if (parent && isCmsColumn(parent) && parent.children.length >= CMS_STRUCTURE_LIMITS.childrenPerColumn) { show("La colonne a déjà atteint sa limite de feuilles."); return; }
+    const cloned = duplicateCmsNode(src, createCmsIdFactory(pageRef.current));
+    const copy = isCmsStructuralNode(cloned) && !isCmsColumn(cloned) ? { ...cloned, x: cloned.x + 24, y: cloned.y + 24, z: cloned.z + 1 } :
+      !isCmsStructuralNode(cloned) ? { ...cloned, x: cloned.x + (parent ? 24 : 24), y: cloned.y + 24, z: cloned.z + 1 } : cloned;
+    update((p) => ({ sections: p.sections.map((item) => {
+      if (item.id !== sectionId) return item;
+      if (!parent) return { ...item, elements: [...item.elements, copy as CmsSectionNode] };
+      if (isCmsContainer(parent) || isCmsGroup(parent)) return updateCmsNodeInSection(item, parent.id, (node) =>
+        isCmsContainer(node) || isCmsGroup(node) ? { ...node, children: [...node.children, copy as CmsElement] } : node);
+      if (isCmsColumn(parent)) {
+        const row = findCmsParentNode(item, parent.id);
+        if (!row || !isCmsRow(row)) return item;
+        return updateCmsNodeInSection(item, row.id, (node) => isCmsRow(node) ? { ...node, children: node.children.map((column) => column.id === parent.id ? { ...column, children: [...column.children, copy as CmsElement] } : column) } : node);
+      }
+      if (isCmsRow(parent) && isCmsColumn(copy)) {
+        const children = normalizeColumnWidths([...parent.children, copy]);
+        return updateCmsNodeInSection(item, parent.id, (node) => isCmsRow(node) ? { ...node, children } : node);
+      }
+      return item;
+    }) }));
+    setSel({ sectionId, elId: copy.id });
+  };
 
   const copyEl = () => {
     if (!selEl || !sel) return;
@@ -234,78 +616,205 @@ export default function PageEditor({
     if (!clipboard) return;
     const targetId = sel?.sectionId ?? page.sections[page.sections.length - 1]?.id;
     if (!targetId) return;
-    const copies = clipboard.map((e) => ({ ...e, id: newId(), x: e.x + 24, y: e.y + 24 }));
+    const targetSection = pageRef.current.sections.find((section) => section.id === targetId);
+    if (!targetSection || targetSection.elements.length + clipboard.length > CMS_STRUCTURE_LIMITS.elementsPerSection || countCmsNodes(pageRef.current) + clipboard.length > CMS_STRUCTURE_LIMITS.totalNodesPerPage) { show("Le collage dépasserait une limite de la page."); return; }
+    const createId = createCmsIdFactory(pageRef.current);
+    const copies = clipboard.map((e) => ({ ...e, id: createId(), x: e.x + 24, y: e.y + 24 }));
     update((p) => ({ sections: p.sections.map((s) => (s.id === targetId ? { ...s, elements: [...s.elements, ...copies] } : s)) }));
     setSel({ sectionId: targetId, elId: copies[0]?.id });
   };
-  const zEl = (sectionId: string, elId: string, dir: 1 | -1) =>
-    update((p) => ({
-      sections: p.sections.map((s) => (s.id === sectionId ? { ...s, elements: s.elements.map((e) => (e.id === elId ? { ...e, z: (e.z || 1) + dir } : e)) } : s)),
-    }));
+  const zEl = (sectionId: string, elId: string, action: "front" | "forward" | "backward" | "back") => {
+    const section = pageRef.current.sections.find((item) => item.id === sectionId);
+    const target = section && findCmsNode(section, elId);
+    if (!section || !target || !isCmsNodeEditable(section, elId)) return;
+    const parent = findCmsParentNode(section, elId);
+    const siblings = parent && (isCmsContainer(parent) || isCmsGroup(parent) || isCmsColumn(parent) || isCmsRow(parent))
+      ? parent.children : section.elements;
+    const otherZ = siblings.filter((node) => node.id !== elId).map((node) => node.z);
+    const nextZ = action === "front" ? Math.max(0, ...otherZ) + 1
+      : action === "back" ? Math.min(0, ...otherZ) - 1
+      : target.z + (action === "forward" ? 1 : -1);
+    update((p) => ({ sections: p.sections.map((item) => item.id === sectionId ? updateCmsNodeInSection(item, elId, (node) => ({ ...node, z: nextZ })) : item) }));
+  };
 
-  // --- Interactions souris (déplacement / redimensionnement) ---
+  // --- Interactions souris : déplacement, redimensionnement, multi-déplacement et pan ---
   useEffect(() => {
-    const move = (e: MouseEvent) => {
-      const d = dragRef.current;
-      if (!d) return;
-      const dx = e.clientX - d.start.x;
-      const dy = e.clientY - d.start.y;
-      let { x, y, w, h } = d.el;
-      if (d.mode === "move") {
-        x = Math.min(PAGE_WIDTH - 40, Math.max(-40, d.el.x + dx));
-        y = Math.min(d.section.h + 200, Math.max(-40, d.el.y + dy));
-      } else if (d.dir) {
-        if (d.dir.includes("e")) w = Math.max(MIN_SIZE, d.el.w + dx);
-        if (d.dir.includes("s")) h = Math.max(MIN_SIZE, d.el.h + dy);
-        if (d.dir.includes("w")) {
-          w = Math.max(MIN_SIZE, d.el.w - dx);
-          x = Math.min(PAGE_WIDTH - 40, d.el.x + dx);
-        }
-        if (d.dir.includes("n")) {
-          h = Math.max(MIN_SIZE, d.el.h - dy);
-          y = Math.min(d.section.h + 200, d.el.y + dy);
-        }
+    const move = (event: MouseEvent) => {
+      const sectionResize = sectionResizeRef.current;
+      if (sectionResize) {
+        const deltaY = screenDeltaToCanvas(event.clientY - sectionResize.startY, sectionResize.scale);
+        if (!sectionResize.moved && Math.abs(deltaY) < 2) return;
+        sectionResize.moved = true;
+        const height = Math.min(4000, Math.max(120, Math.round(sectionResize.initialHeight + deltaY)));
+        const next: CmsPage = { sections: pageRef.current.sections.map((section) => section.id === sectionResize.sectionId ? { ...section, h: height } : section) };
+        pageRef.current = next;
+        setPage(next);
+        return;
       }
-      setSelSafe(d);
-      // Applique sans polluer l'historique à chaque frame :
-      setPage((p) => ({
-        sections: p.sections.map((s) =>
-          s.id === d.section.id ? { ...s, elements: s.elements.map((e) => (e.id === d.el.id ? { ...e, x, y, w, h } : e)) } : s
-        ),
-      }));
+      if (panRef.current && stageRef.current) {
+        stageRef.current.scrollLeft = panRef.current.scrollLeft - (event.clientX - panRef.current.startX);
+        stageRef.current.scrollTop = panRef.current.scrollTop - (event.clientY - panRef.current.startY);
+        return;
+      }
+      const drag = dragRef.current;
+      if (!drag) return;
+      const screenDx = event.clientX - drag.start.x;
+      const screenDy = event.clientY - drag.start.y;
+      if (!drag.moved && Math.hypot(screenDx, screenDy) < 3) return;
+      drag.moved = true;
+      let dx = screenDeltaToCanvas(screenDx, scaleRef.current);
+      let dy = screenDeltaToCanvas(screenDy, scaleRef.current);
+      const current = pageRef.current;
+      const section = current.sections.find((item) => item.id === drag.section.id);
+      if (!section) return;
+      if (drag.members?.length) {
+        const minX = Math.min(...drag.members.map((member) => member.frame.x));
+        const minY = Math.min(...drag.members.map((member) => member.frame.y));
+        const maxX = Math.max(...drag.members.map((member) => member.frame.x + member.frame.w));
+        const maxY = Math.max(...drag.members.map((member) => member.frame.y + member.frame.h));
+        const minDx = -minX;
+        const maxDx = PAGE_WIDTH - maxX;
+        const minDy = -minY;
+        const maxDy = section.h - maxY;
+        dx = minDx <= maxDx ? Math.min(maxDx, Math.max(minDx, dx)) : 0;
+        dy = minDy <= maxDy ? Math.min(maxDy, Math.max(minDy, dy)) : 0;
+        const byId = new Map(drag.members.map((member) => [member.id, member.frame]));
+        const next: CmsPage = { sections: current.sections.map((item) => item.id !== section.id ? item : {
+          ...item,
+          elements: item.elements.map((node) => {
+            if (isCmsStructuralNode(node) || !byId.has(node.id)) return node;
+            const frame = byId.get(node.id)!;
+            return applyCmsElementBreakpointPatch(node, device, toCmsBreakpointFramePatch({ x: frame.x + dx, y: frame.y + dy }, device));
+          }),
+        }) };
+        pageRef.current = next;
+        setPage(next);
+        return;
+      }
+      if (isCmsColumn(drag.node)) return;
+      const parent = drag.parentId ? findCmsParentNode(section, drag.node.id) : undefined;
+      const parentFrame = parent && (isCmsContainer(parent) || isCmsGroup(parent)) ? parent : undefined;
+      const bounds = parentFrame ? { width: parentFrame.w, height: parentFrame.h } : { width: PAGE_WIDTH, height: section.h };
+      let frame = { x: drag.node.x, y: drag.node.y, w: drag.node.w, h: drag.node.h };
+      if (drag.mode === "move") {
+        frame = clampFrame({ ...frame, x: drag.node.x + dx, y: drag.node.y + dy }, bounds.width, bounds.height);
+        const siblings: CmsNode[] = parentFrame ? parentFrame.children : section.elements;
+        const others = siblings.filter((candidate): candidate is CmsElement => candidate.id !== drag.node.id && !candidate.hidden && !isCmsStructuralNode(candidate))
+          .map((candidate) => !parentFrame || isCmsGroup(parentFrame) ? resolveCmsElementFrame(candidate, device) : ({ x: candidate.x, y: candidate.y, w: candidate.w, h: candidate.h }));
+        setGuideSectionId(section.id);
+        const logicalGridSize = 20 * PAGE_WIDTH / CMS_BREAKPOINT_WIDTH[device];
+        const snapped = snapFrame(frame, { enabled: snapEnabled, gridEnabled: snapEnabled, gridSize: logicalGridSize,
+          threshold: screenDeltaToCanvas(8, scaleRef.current), canvasWidth: bounds.width, canvasHeight: bounds.height, otherFrames: others });
+        frame = snapped.frame;
+        setGuides(snapped.guides.map((guide) => ({ ...guide, position: guide.position + (parentFrame?.x ?? 0) })));
+      } else if (drag.dir) {
+        frame = resizeFrame(frame, drag.dir, dx, dy, bounds.width, bounds.height, MIN_SIZE);
+        setGuides([]);
+      }
+      const next: CmsPage = { sections: current.sections.map((item) => item.id === section.id
+        ? updateCmsNodeInSection(item, drag.node.id, (node) => {
+            if (isCmsGroup(node) && drag.mode === "resize") return resizeCmsGroupToFrame(drag.node as CmsGroup, frame);
+            if (isCmsStructuralNode(node)) return isCmsColumn(node) ? node : { ...node, ...frame } as CmsStructuralNode;
+            if (drag.parentId && parentFrame && !isCmsGroup(parentFrame)) return { ...node, ...frame };
+            return applyCmsElementBreakpointPatch(node, device, toCmsBreakpointFramePatch(frame, device));
+          }) : item) };
+      pageRef.current = next;
+      setPage(next);
     };
     const up = () => {
-      const d = dragRef.current;
-      if (!d) return;
+      const sectionResize = sectionResizeRef.current;
+      if (sectionResize) {
+        sectionResizeRef.current = null;
+        if (!sectionResize.moved) {
+          pageRef.current = sectionResize.originalPage;
+          setPage(sectionResize.originalPage);
+          return;
+        }
+        const currentSection = pageRef.current.sections.find((section) => section.id === sectionResize.sectionId);
+        const originalSection = sectionResize.originalPage.sections.find((section) => section.id === sectionResize.sectionId);
+        if (currentSection?.h === originalSection?.h) return;
+        pushHistory(pageRef.current);
+        editRevision.current += 1;
+        setDirty(true);
+        return;
+      }
+      if (panRef.current) { panRef.current = null; return; }
+      const drag = dragRef.current;
+      if (!drag) return;
       dragRef.current = null;
-      // snapshot d'historique à la fin du drag
-      setHistory((hh) => {
-        const next = [...hh.slice(0, histIdxRef.current + 1), JSON.stringify(pageRef.current)].slice(-50);
-        setHistIdx(next.length - 1);
-        return next;
-      });
+      setGuides([]);
+      setGuideSectionId(null);
+      if (!drag.moved) return;
+      const currentSection = pageRef.current.sections.find((item) => item.id === drag.section.id);
+      const unchanged = drag.members?.length
+        ? !!currentSection && drag.members.every((member) => {
+            const currentNode = findCmsNode(currentSection, member.id);
+            return !!currentNode && !isCmsStructuralNode(currentNode) && JSON.stringify(resolveCmsElementFrame(currentNode, device)) === JSON.stringify(member.frame);
+          })
+        : (() => {
+            const node = currentSection && findCmsNode(currentSection, drag.node.id);
+            if (!node || !("x" in node) || !("x" in drag.node)) return true;
+            const nodeParent = drag.parentId ? findCmsParentNode(currentSection, node.id) : undefined;
+            const frame = isCmsStructuralNode(node)
+              ? { x: node.x, y: node.y, w: node.w, h: node.h }
+              : drag.parentId && !isCmsGroup(nodeParent) ? { x: node.x, y: node.y, w: node.w, h: node.h } : resolveCmsElementFrame(node, device);
+            return frame.x === drag.node.x && frame.y === drag.node.y && frame.w === drag.node.w && frame.h === drag.node.h;
+          })();
+      if (unchanged) {
+        pageRef.current = drag.originalPage;
+        setPage(drag.originalPage);
+        return;
+      }
+      pushHistory(pageRef.current);
+      editRevision.current += 1;
       setDirty(true);
-      scheduleSave();
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
-    return () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
+    return () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+  }, [device, pushHistory, snapEnabled]);
+
+  const startSectionResize = (event: React.MouseEvent, section: CmsSection) => {
+    if (spacePressed || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    scaleRef.current = canvasScale;
+    selectSection(section.id);
+    sectionResizeRef.current = {
+      sectionId: section.id,
+      startY: event.clientY,
+      initialHeight: section.h,
+      scale: canvasScale,
+      moved: false,
+      originalPage: pageRef.current,
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  };
 
-  const pageRef = useRef(page);
-  const histIdxRef = useRef(histIdx);
-  const selRef = useRef<Sel | null>(null);
-  pageRef.current = page;
-  histIdxRef.current = histIdx;
-  selRef.current = sel;
-
-  const setSelSafe = (d: NonNullable<typeof dragRef.current>) => {
-    const s = selRef.current;
-    setSel(s && s.elId === d.el.id ? s : { sectionId: d.section.id, elId: d.el.id });
+  const startDrag = (e: React.MouseEvent, section: CmsSection, node: CmsNode, mode: "move" | "resize", dir?: string, parentId?: string) => {
+    if (spacePressed || e.button !== 0 || isCmsColumn(node)) return;
+    scaleRef.current = canvasScale;
+    e.preventDefault();
+    e.stopPropagation();
+    const rootLeaf = !parentId && !isCmsStructuralNode(node);
+    const selection = { sectionId: section.id, elId: node.id, parentId };
+    const modified = e.metaKey || e.ctrlKey;
+    const preserveMulti = rootLeaf && !modified && multiSel.length > 1 && multiSel.some((item) => item.elId === node.id && item.sectionId === section.id);
+    if (modified) {
+      if (selectNode(selection, e, rootLeaf)) return;
+    } else if (preserveMulti) setSel(selection);
+    else selectNode(selection);
+    const ancestors = cmsAncestors(section, node.id);
+    if (node.locked || ancestors.some((parent) => parent.locked)) return;
+      const parentNode = parentId ? findCmsParentNode(section, node.id) : undefined;
+      if ((isCmsStructuralNode(node) || (parentId && !isCmsGroup(parentNode))) && device !== "desktop") { show("Les structures et les feuilles en flux s’éditent sur Desktop uniquement."); return; }
+    setEditingText(null);
+    const effectiveNode = !isCmsStructuralNode(node) && (!parentId || isCmsGroup(parentNode)) ? getCmsElementForBreakpoint(node, device) : node;
+    const members = preserveMulti ? multiSel.flatMap((item) => {
+      const candidate = findCmsNode(section, item.elId);
+      return candidate && !isCmsStructuralNode(candidate) ? [{ id: candidate.id, frame: resolveCmsElementFrame(candidate, device) }] : [];
+    }) : undefined;
+    if (preserveMulti && activeMultiElements.some((element) => element.locked)) { show("Déverrouillez tous les éléments sélectionnés avant leur déplacement commun."); return; }
+    dragRef.current = { mode, dir, start: { x: e.clientX, y: e.clientY }, node: effectiveNode, parentId, section, moved: false, originalPage: pageRef.current, members };
   };
 
   // --- Raccourcis clavier ---
@@ -313,9 +822,11 @@ export default function PageEditor({
     const h = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement)?.isContentEditable) return;
-      if ((e.key === "Delete" || e.key === "Backspace") && sel) {
+      if ((e.key === "Delete" || e.key === "Backspace") && (activeMulti.length > 1 || sel)) {
         e.preventDefault();
-        removeEl(sel.sectionId, sel.elId);
+        if (activeMulti.length > 1) removeMulti();
+        else if (sel?.elId === SECTION_SELECTION_ID) removeSection(sel.sectionId);
+        else if (sel) removeEl(sel.sectionId, sel.elId);
       }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
@@ -323,7 +834,9 @@ export default function PageEditor({
       }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d") {
         e.preventDefault();
-        if (sel) duplicateEl(sel.sectionId, sel.elId);
+        if (activeMulti.length > 1) duplicateMulti();
+        else if (sel?.elId === SECTION_SELECTION_ID) duplicateSection(sel.sectionId);
+        else if (sel) duplicateEl(sel.sectionId, sel.elId);
       }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c") copyEl();
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "v") pasteEl();
@@ -331,30 +844,42 @@ export default function PageEditor({
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sel, page, clipboard]);
+  }, [sel, page, clipboard, multiSel]);
 
-  const startDrag = (e: React.MouseEvent, s: CmsSection, el: CmsElement, mode: "move" | "resize", dir?: string) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (el.locked && mode === "move") return;
-    setSel({ sectionId: s.id, elId: el.id });
-    setEditingText(null);
-    dragRef.current = { mode, dir, start: { x: e.clientX, y: e.clientY }, el: { ...el }, section: s };
-  };
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (event.code === "Space" && target?.tagName !== "INPUT" && target?.tagName !== "TEXTAREA" && !target?.isContentEditable) {
+        event.preventDefault();
+        setSpacePressed(true);
+      }
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code === "Space") setSpacePressed(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, []);
 
   const publish = async (pub: boolean) => {
     if (saveTimer.current) clearTimeout(saveTimer.current);
+    const publishingRevision = editRevision.current;
+    const publishingPage = page;
     setSaving(true);
     try {
-      const d = await api({ action: "update", name, slug, data: page, publish: pub, saveVersion: pub ? "Publication" : undefined });
+      const d = await api({ action: "update", name, slug, data: publishingPage, publish: pub, saveVersion: pub ? "Publication" : undefined });
       if (d.error || d.ok === false) throw new Error(d.error ?? "Publication impossible.");
       setStatus(pub ? "published" : "draft");
-      setDirty(false);
-      if (pub) setPublishedSnapshot(JSON.stringify(page));
+      if (pub) setPublishedSnapshot(JSON.stringify(publishingPage));
+      setDirty(editRevision.current !== publishingRevision);
       show(pub ? "Page publiée ✓" : "Retirée de la publication.");
       await loadVersionsNow();
-    } catch {
-      show("Échec de la publication.");
+    } catch (error) {
+      show(error instanceof Error ? error.message : "Échec de la publication.");
     } finally {
       setSaving(false);
     }
@@ -366,8 +891,307 @@ export default function PageEditor({
   };
 
   const hasUnpublishedChanges = status === "published" && publishedSnapshot !== JSON.stringify(page);
-  const vpw = DEVICE_WIDTH[device];
-  const editorLibrary = initialSlug === "boutique" ? LIBRARY.filter((item) => item.type !== "product" && item.type !== "productGrid") : LIBRARY;
+  const vpw = CMS_BREAKPOINT_WIDTH[device];
+  const deviceScale = Math.min(1, vpw / PAGE_WIDTH);
+  const canvasScale = deviceScale * zoom / 100;
+  const gridStep = 20 * PAGE_WIDTH / vpw;
+  const setZoomToFit = () => {
+    const availableWidth = stageRef.current?.clientWidth ?? PAGE_WIDTH;
+    setZoom(canvasFitZoom(availableWidth, PAGE_WIDTH, deviceScale));
+  };
+  const alignSelected = (alignment: "left" | "centerX" | "right" | "top" | "centerY" | "bottom") => {
+    if (!sel || !selSection || selReadOnly || selParent) return;
+    if (selEl) {
+      const currentFrame = resolveCmsElementFrame(selEl, device);
+      const aligned = alignFrame(currentFrame, alignment, PAGE_WIDTH, selSection.h);
+      setElAtDevice(selSection.id, selEl.id, toCmsBreakpointFramePatch({ x: aligned.x, y: aligned.y }, device));
+      return;
+    }
+    if (selNode && !isCmsColumn(selNode) && isCmsStructuralNode(selNode)) {
+      const aligned = alignFrame({ x: selNode.x, y: selNode.y, w: selNode.w, h: selNode.h }, alignment, PAGE_WIDTH, selSection.h);
+      setStructure(selSection.id, selNode.id, { x: aligned.x, y: aligned.y });
+    }
+  };
+  const editorLibrary = initialSlug === "boutique"
+    ? LIBRARY.filter((item) => item.type !== "product" && item.type !== "productGrid" && !(item.type === "text" && item.def.content?.variant === "link"))
+    : LIBRARY;
+  const libraryEntriesByCategory = editorLibrary.reduce<Record<string, EditorLibraryEntry[]>>((acc, item) => {
+    (acc[item.category] ??= []).push({ kind: "element", item });
+    return acc;
+  }, {});
+  if (!PHASE3B_DISABLED_SLUGS.has(initialSlug)) {
+    libraryEntriesByCategory.Structure = [
+      ...PHASE3B_LIBRARY_ENTRIES,
+      ...(libraryEntriesByCategory.Structure ?? []),
+    ];
+  }
+  const editorLibraryGroups = Object.entries(libraryEntriesByCategory)
+    .sort(([left], [right]) => LIBRARY_CATEGORY_ORDER.indexOf(left) - LIBRARY_CATEGORY_ORDER.indexOf(right));
+  const isConnectedContentPage = ["faq", "boutique", "comment-ca-marche", "livraison"].includes(initialSlug);
+
+  const addEditorialTextBlock = (sectionId: string) => {
+    const section = page.sections.find((item) => item.id === sectionId);
+    if (!section) return;
+    const existing = section.elements.filter((element): element is CmsElement => !isCmsStructuralNode(element) && Number.isFinite(element.y) && Number.isFinite(element.h) && Number.isFinite(element.z));
+    const y = Math.max(120, ...existing.map((element) => element.y + element.h + 16));
+    const block: CmsElement = {
+      id: createCmsIdFactory(pageRef.current)(), type: "text", x: 40, y, w: 1120, h: 96,
+      z: Math.max(0, ...existing.map((element) => element.z)) + 1, rotation: 0, opacity: 1,
+      content: { role: "editorialBlock", text: "Nouveau texte", variant: "p" },
+      style: { fontFamily: "sans", size: 16, weight: 400, color: "#9a98a8", align: "left", lineHeight: 1.6 },
+    };
+    update((current) => ({
+      sections: current.sections.map((item) => item.id === sectionId
+        ? { ...item, h: Math.max(item.h, y + block.h + 24), elements: [...item.elements, block] }
+        : item),
+    }));
+    show("Bloc texte ajouté au brouillon.");
+  };
+
+  const moveEditorialTextBlock = (sectionId: string, elementId: string, direction: -1 | 1) => {
+    update((current) => ({
+      sections: current.sections.map((section) => {
+        if (section.id !== sectionId) return section;
+        const index = section.elements.findIndex((element) => !isCmsStructuralNode(element) && element.id === elementId && element.content?.role === "editorialBlock");
+        const blockIndexes = section.elements.flatMap((element, i) => !isCmsStructuralNode(element) && element.content?.role === "editorialBlock" ? [i] : []);
+        const blockPosition = blockIndexes.indexOf(index);
+        const targetIndex = blockIndexes[blockPosition + direction];
+        if (index < 0 || targetIndex === undefined) return section;
+        const elements = [...section.elements];
+        [elements[index], elements[targetIndex]] = [elements[targetIndex], elements[index]];
+        if (initialSlug === "boutique") {
+          const baseY = Math.max(0, ...elements.filter((element) => !isCmsStructuralNode(element) && element.content?.role !== "editorialBlock" && Number.isFinite(element.y) && Number.isFinite(element.h)).map((element) => element.y + element.h + 16));
+          let nextY = baseY;
+          for (const element of elements) {
+            if (!isCmsStructuralNode(element) && element.content?.role === "editorialBlock") {
+              element.y = nextY;
+              nextY += element.h + 16;
+            }
+          }
+          return { ...section, h: Math.max(section.h, nextY + 16), elements };
+        }
+        return { ...section, elements };
+      }),
+    }));
+  };
+
+  const moveFaqItem = (sectionId: string, element: CmsElement, itemIndex: number, direction: -1 | 1) => {
+    const items = Array.isArray(element.content.items) ? [...element.content.items] : [];
+    const target = itemIndex + direction;
+    if (target < 0 || target >= items.length) return;
+    [items[itemIndex], items[target]] = [items[target], items[itemIndex]];
+    setEl(sectionId, element.id, { content: { ...element.content, items } });
+  };
+
+  const restoreVersion = async (versionId: number) => {
+    if (saving) return;
+    if (dirty && !window.confirm("Restaurer cette version remplacera les modifications non enregistrées du brouillon. Continuer ?")) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    setSaving(true);
+    try {
+      const result = await api({ action: "restore", versionId });
+      if (!result.ok || !result.data) throw new Error(result.error ?? "Restauration impossible.");
+      editRevision.current += 1;
+      pageRef.current = result.data as CmsPage;
+      setPage(result.data as CmsPage);
+      pushHistory(result.data as CmsPage);
+      setDirty(false);
+      show("Version restaurée dans le brouillon. Publiez-la pour la mettre en ligne.");
+    } catch (error) {
+      show(error instanceof Error ? error.message : "Restauration impossible.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const confirmDelete = () => {
+    if (!pendingDelete) return;
+    const pending = pendingDelete;
+    update((current) => ({
+      sections: current.sections.map((section) => {
+        if (section?.id !== pending.sectionId) return section;
+        if (pending.kind === "element") {
+          return { ...section, elements: section.elements.filter((element) => element?.id !== pending.elementId) };
+        }
+        return {
+          ...section,
+          elements: section.elements.map((element) => !isCmsStructuralNode(element) && element.id === pending.elementId
+            ? { ...element, content: { ...element.content, items: Array.isArray(element.content.items) ? element.content.items.filter((_: unknown, index: number) => index !== pending.itemIndex) : [] } }
+            : element),
+        };
+      }),
+    }));
+    if (pending.kind === "element") setSel(null);
+    setPendingDelete(null);
+  };
+
+  if (isConnectedContentPage) {
+    const sectionLabel = (index: number) => {
+      if (initialSlug === "boutique") return index === 0 ? "Éditorial avant les produits" : `Éditorial après les produits · ${index}`;
+      if (initialSlug === "comment-ca-marche") return index === 0 ? "Introduction" : index <= 4 ? `Étape ${String(index).padStart(2, "0")}` : index === 5 ? "Chaîne technique" : "Appel à l’action";
+      if (initialSlug === "livraison") return index === 0 ? "Informations et livraison" : `Contenu juridique · ${index + 1}`;
+      return "Questions fréquentes";
+    };
+    const statusText = status === "published" ? (dirty || hasUnpublishedChanges ? "Publiée · brouillon modifié" : "Publiée") : "Brouillon";
+    const editableSections = Array.isArray(page?.sections)
+      ? page.sections.filter((section): section is CmsSection => !!section && typeof section === "object" && typeof section.id === "string" && Array.isArray(section.elements))
+      : [];
+
+    return (
+      <div className="flex h-screen flex-col bg-night text-ink">
+        <header className="shrink-0 border-b border-line bg-surface px-4 py-3 sm:px-6">
+          <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-3">
+            <Link href="/admin/editeur" className="rounded-full border border-line px-3 py-2 text-xs text-muted hover:text-ink">← Éditeur du site</Link>
+            <div className="min-w-0 flex-1">
+              <h1 className="truncate text-sm font-medium text-ink">{name}</h1>
+              <p className="text-xs text-faint">/{slug} · {statusText}{dirty ? " · modifications à enregistrer" : ""}</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button onClick={undo} disabled={histIdx <= 0} className="rounded-full border border-line px-3 py-2 text-xs text-muted disabled:opacity-40" aria-label="Annuler la dernière modification">Annuler</button>
+              <button onClick={redo} disabled={histIdx >= history.length - 1} className="rounded-full border border-line px-3 py-2 text-xs text-muted disabled:opacity-40" aria-label="Rétablir la modification">Rétablir</button>
+              <button onClick={() => setShowVersions((visible) => !visible)} className="rounded-full border border-line px-3 py-2 text-xs text-muted hover:text-ink">Versions ({versions.length})</button>
+              <button onClick={previewDraft} disabled={saving} className="rounded-full border border-line px-3 py-2 text-xs text-muted disabled:opacity-50">Aperçu du brouillon</button>
+              <button onClick={() => void doSave()} disabled={saving} className="rounded-full border border-gold px-4 py-2 text-xs font-medium text-gold disabled:opacity-50">{saving ? "Enregistrement…" : "Enregistrer le brouillon"}</button>
+              <button onClick={() => void publish(true)} disabled={saving} className="rounded-full bg-gold px-4 py-2 text-xs font-medium text-night disabled:opacity-50">Publier</button>
+              {status === "published" && <button onClick={() => void publish(false)} disabled={saving} className="rounded-full border border-line px-3 py-2 text-xs text-muted disabled:opacity-50">Dépublier</button>}
+            </div>
+          </div>
+          {(toast || saving) && <div className="mx-auto mt-2 max-w-5xl" aria-live="polite">{toast && <p className="text-xs text-goldsoft">{toast}</p>}{saving && <p className="text-xs text-muted">Enregistrement en cours…</p>}</div>}
+        </header>
+
+        {showVersions && (
+          <section className="shrink-0 border-b border-line bg-surface/70 px-4 py-3 sm:px-6" aria-label="Historique des versions">
+            <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-2">
+              <span className="mr-2 text-xs text-muted">Versions enregistrées — restauration dans le brouillon :</span>
+              {versions.length ? versions.map((version) => (
+                <button key={version.id} onClick={() => void restoreVersion(version.id)} disabled={saving} className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:border-gold hover:text-ink disabled:opacity-50">
+                  Restaurer · {version.label} · {new Date(version.createdAt).toLocaleString("fr-FR")}
+                </button>
+              )) : <span className="text-xs text-faint">Aucune version enregistrée.</span>}
+            </div>
+          </section>
+        )}
+
+        <main className="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6 sm:py-8">
+          <fieldset disabled={saving} className="mx-auto min-w-0 max-w-5xl space-y-5 border-0 p-0">
+            <div className="rounded-xl border border-line bg-surface/50 p-4 sm:p-5">
+              <p className="text-sm font-medium text-ink">Contenu éditorial</p>
+              <p className="mt-1 text-xs leading-relaxed text-muted">Modifiez les textes structurés ci-dessous. Les changements restent en brouillon jusqu’à publication. Les produits de la boutique, lorsqu’ils existent, restent gérés par le catalogue dynamique.</p>
+            </div>
+            {editableSections.map((section, sectionIndex) => (
+              <section key={section.id} className="rounded-2xl border border-line bg-surface/40 p-4 sm:p-6" aria-label={sectionLabel(sectionIndex)}>
+                <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                  <h2 className="text-sm font-medium text-goldsoft">{sectionLabel(sectionIndex)}</h2>
+                  <button onClick={() => addEditorialTextBlock(section.id)} className="rounded-full border border-gold/50 px-3 py-2 text-xs text-gold hover:bg-gold/10">+ Ajouter un bloc texte</button>
+                </div>
+                <div className="space-y-4">
+                  {section.elements.filter((element): element is CmsElement => !!element && typeof element === "object" && typeof element.id === "string").map((element) => (
+                    <article key={element.id} className="rounded-xl border border-line bg-night/70 p-4">
+                      {element.type === "faq" ? (
+                        <div className="space-y-4">
+                          <p className="text-xs font-medium tracking-wide text-muted">FAQ · titre, introduction, questions et réponses</p>
+                          <label className="block text-xs text-muted">Sur-titre
+                            <input className="mt-1.5 w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink" value={String(element.content.eyebrow ?? "")} onChange={(event) => setEl(section.id, element.id, { content: { ...element.content, eyebrow: event.target.value } })} />
+                          </label>
+                          <label className="block text-xs text-muted">Titre principal
+                            <input className="mt-1.5 w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink" value={String(element.content.title ?? "")} onChange={(event) => setEl(section.id, element.id, { content: { ...element.content, title: event.target.value } })} />
+                          </label>
+                          <label className="block text-xs text-muted">Introduction (facultative)
+                            <textarea rows={3} className="mt-1.5 w-full resize-y rounded-lg border border-line bg-surface px-3 py-2.5 text-sm leading-relaxed text-ink" value={String(element.content.intro ?? "")} onChange={(event) => setEl(section.id, element.id, { content: { ...element.content, intro: event.target.value } })} />
+                          </label>
+                          <div className="space-y-3">
+                            <h3 className="text-xs font-medium text-ink">Questions et réponses</h3>
+                            {(Array.isArray(element.content.items) ? element.content.items : []).map((item: any, itemIndex: number) => (
+                              <div key={`${element.id}-faq-${itemIndex}`} className="rounded-lg border border-line bg-surface/50 p-3 sm:p-4">
+                                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                                  <span className="text-xs text-muted">Question {itemIndex + 1}</span>
+                                  <div className="flex gap-2">
+                                    <button onClick={() => moveFaqItem(section.id, element, itemIndex, -1)} disabled={itemIndex === 0} className="rounded border border-line px-2.5 py-1 text-xs text-muted disabled:opacity-40" aria-label={`Monter la question ${itemIndex + 1}`}>Monter ↑</button>
+                                    <button onClick={() => moveFaqItem(section.id, element, itemIndex, 1)} disabled={itemIndex === element.content.items.length - 1} className="rounded border border-line px-2.5 py-1 text-xs text-muted disabled:opacity-40" aria-label={`Descendre la question ${itemIndex + 1}`}>Descendre ↓</button>
+                                    <button onClick={() => setPendingDelete({ sectionId: section.id, elementId: element.id, kind: "faqItem", itemIndex })} className="rounded border border-danger/40 px-2.5 py-1 text-xs text-danger">Supprimer</button>
+                                  </div>
+                                </div>
+                                <label className="block text-xs text-muted">Question
+                                  <textarea rows={2} className="mt-1.5 w-full resize-y rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink" value={String(item?.question ?? "")} onChange={(event) => { const items = [...element.content.items]; items[itemIndex] = { ...item, question: event.target.value }; setEl(section.id, element.id, { content: { ...element.content, items } }); }} />
+                                </label>
+                                <label className="mt-3 block text-xs text-muted">Réponse
+                                  <textarea rows={4} className="mt-1.5 w-full resize-y rounded-lg border border-line bg-surface px-3 py-2.5 text-sm leading-relaxed text-ink" value={String(item?.answer ?? "")} onChange={(event) => { const items = [...element.content.items]; items[itemIndex] = { ...item, answer: event.target.value }; setEl(section.id, element.id, { content: { ...element.content, items } }); }} />
+                                </label>
+                              </div>
+                            ))}
+                            <button onClick={() => setEl(section.id, element.id, { content: { ...element.content, items: [...(Array.isArray(element.content.items) ? element.content.items : []), { question: "Nouvelle question", answer: "Nouvelle réponse" }] } })} className="rounded-full border border-line px-3 py-2 text-xs text-muted hover:border-gold hover:text-ink">+ Ajouter une question</button>
+                          </div>
+                          <div className="grid gap-3 border-t border-line pt-4 sm:grid-cols-2">
+                            <label className="block text-xs text-muted">Titre du contact
+                              <input className="mt-1.5 w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink" value={String(element.content.contactTitle ?? "")} onChange={(event) => setEl(section.id, element.id, { content: { ...element.content, contactTitle: event.target.value } })} />
+                            </label>
+                            <label className="block text-xs text-muted">Texte du contact
+                              <input className="mt-1.5 w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink" value={String(element.content.contactText ?? "")} onChange={(event) => setEl(section.id, element.id, { content: { ...element.content, contactText: event.target.value } })} />
+                            </label>
+                            <label className="block text-xs text-muted">Libellé du lien
+                              <input className="mt-1.5 w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink" value={String(element.content.contactLabel ?? "")} onChange={(event) => setEl(section.id, element.id, { content: { ...element.content, contactLabel: event.target.value } })} />
+                            </label>
+                            <label className="block text-xs text-muted">URL du lien
+                              <input className="mt-1.5 w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink" value={String(element.content.contactHref ?? "")} onChange={(event) => setEl(section.id, element.id, { content: { ...element.content, contactHref: event.target.value } })} />
+                            </label>
+                          </div>
+                        </div>
+                      ) : element.type === "text" ? (
+                        <div className="space-y-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-xs font-medium text-muted">{element.content.role === "editorialBlock" ? "Bloc texte" : element.content.variant === "h1" || element.content.variant === "h2" || element.content.variant === "h3" ? `Titre · ${element.content.variant.toUpperCase()}` : element.content.variant === "link" ? "Lien" : "Texte · paragraphe"}</p>
+                            <div className="flex gap-2">
+                              {element.content.role === "editorialBlock" && <>
+                                <button onClick={() => moveEditorialTextBlock(section.id, element.id, -1)} disabled={!section.elements.slice(0, section.elements.findIndex((candidate) => candidate.id === element.id)).some((candidate) => !isCmsStructuralNode(candidate) && candidate.content?.role === "editorialBlock")} className="rounded border border-line px-2.5 py-1 text-xs text-muted disabled:opacity-40">Monter ↑</button>
+                                <button onClick={() => moveEditorialTextBlock(section.id, element.id, 1)} disabled={!section.elements.slice(section.elements.findIndex((candidate) => candidate.id === element.id) + 1).some((candidate) => !isCmsStructuralNode(candidate) && candidate.content?.role === "editorialBlock")} className="rounded border border-line px-2.5 py-1 text-xs text-muted disabled:opacity-40">Descendre ↓</button>
+                              </>}
+                              <button onClick={() => setPendingDelete({ sectionId: section.id, elementId: element.id, kind: "element" })} className="rounded border border-danger/40 px-2.5 py-1 text-xs text-danger">Supprimer</button>
+                            </div>
+                          </div>
+                          <label className="block text-xs text-muted">Texte
+                            <textarea rows={element.content.variant === "h1" || element.content.variant === "h2" ? 2 : 4} className="mt-1.5 w-full resize-y rounded-lg border border-line bg-surface px-3 py-2.5 text-sm leading-relaxed text-ink" value={String(element.content.text ?? "")} onChange={(event) => setEl(section.id, element.id, { content: { ...element.content, text: event.target.value } })} />
+                          </label>
+                          {element.content.variant === "link" && <label className="block text-xs text-muted">URL du lien
+                            <input className="mt-1.5 w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink" value={String(element.link ?? "")} onChange={(event) => setEl(section.id, element.id, { link: event.target.value })} />
+                          </label>}
+                        </div>
+                      ) : element.type === "button" ? (
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <label className="block text-xs text-muted">Libellé du bouton
+                            <input className="mt-1.5 w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink" value={String(element.content.text ?? "")} onChange={(event) => setEl(section.id, element.id, { content: { ...element.content, text: event.target.value } })} />
+                          </label>
+                          <label className="block text-xs text-muted">URL du bouton
+                            <input className="mt-1.5 w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink" value={String(element.content.href ?? "")} onChange={(event) => setEl(section.id, element.id, { content: { ...element.content, href: event.target.value } })} />
+                          </label>
+                          <div className="sm:col-span-2"><button onClick={() => setPendingDelete({ sectionId: section.id, elementId: element.id, kind: "element" })} className="rounded border border-danger/40 px-2.5 py-1 text-xs text-danger">Supprimer ce bouton</button></div>
+                        </div>
+                      ) : (
+                        <p className="text-xs leading-relaxed text-faint">Élément « {element.type} » conservé tel quel. Son édition visuelle n’est pas comprise dans cette phase.</p>
+                      )}
+                    </article>
+                  ))}
+                  {section.elements.length === 0 && <p className="rounded-lg border border-dashed border-line p-4 text-xs text-faint">Aucun contenu dans cette section.</p>}
+                </div>
+              </section>
+            ))}
+            {!editableSections.length && <p role="alert" className="rounded-xl border border-danger/30 p-4 text-sm text-danger">Le brouillon ne contient aucune section exploitable. Le contenu public actuel reste conservé tant qu’une version valide n’est pas publiée.</p>}
+          </fieldset>
+        </main>
+        {pendingDelete && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="presentation">
+            <div role="alertdialog" aria-modal="true" aria-labelledby="cms-delete-title" aria-describedby="cms-delete-description" className="w-full max-w-md rounded-2xl border border-line bg-surface p-5 shadow-2xl sm:p-6">
+              <h2 id="cms-delete-title" className="text-base font-medium text-ink">{pendingDelete.kind === "faqItem" ? "Supprimer cette question ?" : "Supprimer cet élément ?"}</h2>
+              <p id="cms-delete-description" className="mt-2 text-sm leading-relaxed text-muted">{pendingDelete.kind === "faqItem" ? "La question et sa réponse seront retirées du brouillon." : "Cet élément sera retiré du brouillon."}</p>
+              <div className="mt-5 flex justify-end gap-2">
+                <button onClick={() => setPendingDelete(null)} className="rounded-full border border-line px-4 py-2 text-sm text-muted hover:text-ink">Annuler</button>
+                <button onClick={confirmDelete} className="rounded-full bg-danger px-4 py-2 text-sm font-medium text-white hover:brightness-110">Supprimer</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen flex-col bg-night text-ink">
@@ -392,19 +1216,46 @@ export default function PageEditor({
         </label>
         <div className="ml-1 flex rounded-full border border-line p-0.5">
           {(["desktop", "tablet", "mobile"] as Device[]).map((d) => (
-            <button key={d} onClick={() => setDevice(d)} className={`rounded-full px-3 py-1 text-[11px] uppercase tracking-wide ${device === d ? "bg-gold text-night" : "text-muted"}`}>
+            <button key={d} type="button" aria-pressed={device === d} title={`Aperçu ${d === "desktop" ? "Desktop" : d === "tablet" ? "Tablette" : "Mobile"} · ${CMS_BREAKPOINT_WIDTH[d]} px`} onClick={() => setDevice(d)} className={`rounded-full px-3 py-1 text-[11px] uppercase tracking-wide ${device === d ? "bg-gold text-night" : "text-muted"}`}>
               {d === "desktop" ? "Desktop" : d === "tablet" ? "Tablette" : "Mobile"}
             </button>
           ))}
         </div>
+        <span className="rounded bg-raised px-2 py-1 text-[10px] text-goldsoft" aria-live="polite">Mode actif · {device === "desktop" ? "Desktop" : device === "tablet" ? "Tablette" : "Mobile"} · {vpw} px</span>
+        <div className="flex flex-wrap items-center gap-1 border-l border-line pl-2" aria-label="Outils du canvas">
+          <ToolBtn onClick={() => { setSpacePressed(false); panRef.current = null; }} title="Mode Sélection actif">Sélection</ToolBtn>
+          <ToolBtn onClick={() => setShowGrid((value) => !value)} title="Afficher ou masquer la grille">Grille {showGrid ? "✓" : "—"}</ToolBtn>
+          <ToolBtn onClick={() => setSnapEnabled((value) => !value)} title="Activer ou désactiver l’aimantation">Snap {snapEnabled ? "✓" : "—"}</ToolBtn>
+          <ToolBtn onClick={() => setZoom((value) => Math.max(25, value - 25))} title="Zoom arrière">Zoom −</ToolBtn>
+          <label className="flex items-center gap-1 text-xs text-muted" title="Niveau de zoom du canvas">
+            <select aria-label="Niveau de zoom" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} className="rounded border border-line bg-night px-1.5 py-1 text-xs text-ink">
+              {[25, 50, 75, 100, 125, 150].map((value) => <option key={value} value={value}>{value} %</option>)}
+            </select>
+          </label>
+          <ToolBtn onClick={() => setZoom((value) => Math.min(150, value + 25))} title="Zoom avant">Zoom +</ToolBtn>
+          <ToolBtn onClick={() => setZoom(100)} title="Rétablir le zoom à 100 %">100 %</ToolBtn>
+          <ToolBtn onClick={setZoomToFit} title="Ajuster le canvas à l’espace visible">Ajuster</ToolBtn>
+        </div>
+        {selSection && !selParent && (selEl || selRow || selGroup || selContainer) && (
+          <div className="flex flex-wrap items-center gap-1 border-l border-line pl-2" aria-label="Alignement de l’élément sélectionné">
+            <ToolBtn onClick={() => alignSelected("left")} disabled={selReadOnly} title="Aligner à gauche du canvas">Gauche</ToolBtn>
+            <ToolBtn onClick={() => alignSelected("centerX")} disabled={selReadOnly} title="Centrer horizontalement">Centre H</ToolBtn>
+            <ToolBtn onClick={() => alignSelected("right")} disabled={selReadOnly} title="Aligner à droite du canvas">Droite</ToolBtn>
+            <ToolBtn onClick={() => alignSelected("top")} disabled={selReadOnly} title="Aligner en haut de la section">Haut</ToolBtn>
+            <ToolBtn onClick={() => alignSelected("centerY")} disabled={selReadOnly} title="Centrer verticalement dans la section">Centre V</ToolBtn>
+            <ToolBtn onClick={() => alignSelected("bottom")} disabled={selReadOnly} title="Aligner en bas de la section">Bas</ToolBtn>
+          </div>
+        )}
         <div className="flex items-center gap-1">
-          <ToolBtn onClick={undo} disabled={histIdx <= 0} title="Annuler (Ctrl+Z)">↶</ToolBtn>
-          <ToolBtn onClick={redo} disabled={histIdx >= history.length - 1} title="Rétablir (Ctrl+Maj+Z)">↷</ToolBtn>
-          <ToolBtn onClick={() => sel && duplicateEl(sel.sectionId, sel.elId)} disabled={!sel} title="Dupliquer (Ctrl+D)">⧉</ToolBtn>
-          <ToolBtn onClick={copyEl} disabled={!sel} title="Copier (Ctrl+C)">⎘</ToolBtn>
+          <ToolBtn onClick={undo} disabled={histIdx <= 0} title="Annuler (Ctrl+Z)">Annuler</ToolBtn>
+          <ToolBtn onClick={redo} disabled={histIdx >= history.length - 1} title="Rétablir (Ctrl+Maj+Z)">Rétablir</ToolBtn>
+          <ToolBtn onClick={() => sel && (selIsSection ? duplicateSection(sel.sectionId) : duplicateEl(sel.sectionId, sel.elId))} disabled={!sel || (!selIsSection && selReadOnly)} title="Dupliquer (Ctrl+D)">⧉</ToolBtn>
+          <ToolBtn onClick={copyEl} disabled={!selEl || selReadOnly} title="Copier (Ctrl+C)">⎘</ToolBtn>
           <ToolBtn onClick={pasteEl} disabled={!clipboard} title="Coller (Ctrl+V)">📋</ToolBtn>
-          <ToolBtn onClick={() => sel && zEl(sel.sectionId, sel.elId, 1)} disabled={!sel} title="Apporter devant">▲</ToolBtn>
-          <ToolBtn onClick={() => sel && zEl(sel.sectionId, sel.elId, -1)} disabled={!sel} title="Passer derrière">▼</ToolBtn>
+          <ToolBtn onClick={() => sel && !selIsSection && zEl(sel.sectionId, sel.elId, "front")} disabled={!sel || selIsSection || selReadOnly} title="Mettre au premier plan">⇈</ToolBtn>
+          <ToolBtn onClick={() => sel && !selIsSection && zEl(sel.sectionId, sel.elId, "forward")} disabled={!sel || selIsSection || selReadOnly} title="Avancer d’un niveau">↑</ToolBtn>
+          <ToolBtn onClick={() => sel && !selIsSection && zEl(sel.sectionId, sel.elId, "backward")} disabled={!sel || selIsSection || selReadOnly} title="Reculer d’un niveau">↓</ToolBtn>
+          <ToolBtn onClick={() => sel && !selIsSection && zEl(sel.sectionId, sel.elId, "back")} disabled={!sel || selIsSection || selReadOnly} title="Mettre à l’arrière-plan">⇊</ToolBtn>
         </div>
         <div className="ml-auto flex items-center gap-2">
           <button onClick={() => setShowVersions((v) => !v)} className="rounded-full border border-line px-3 py-1.5 text-xs text-muted hover:text-ink">
@@ -439,15 +1290,7 @@ export default function PageEditor({
           {versions.map((v) => (
             <button
               key={v.id}
-              onClick={async () => {
-                const d = await api({ action: "restore", versionId: v.id });
-                if (d.ok && d.data) {
-                  setPage(d.data as CmsPage);
-                  pushHistory(d.data as CmsPage);
-                  setDirty(true);
-                  show("Version restaurée dans le brouillon.");
-                }
-              }}
+              onClick={() => void restoreVersion(v.id)}
               className="rounded-full border border-line px-3 py-1 text-xs text-muted hover:border-gold hover:text-ink"
             >
               {v.label} · {new Date(v.createdAt).toLocaleString("fr-FR")}
@@ -473,22 +1316,68 @@ export default function PageEditor({
         {/* Bibliothèque */}
         <aside className="w-52 shrink-0 overflow-y-auto border-r border-line bg-surface/60 p-3">
           <p className="mb-2 text-[10px] tracking-[0.2em] text-faint uppercase">Bibliothèque</p>
-          {Object.entries(editorLibrary.reduce<Record<string, typeof LIBRARY>>((acc, l) => ((acc[l.category] ??= []).push(l), acc), {})).map(([cat, items]) => (
+          {editorLibraryGroups.map(([cat, items]) => (
             <div key={cat} className="mb-3">
               <p className="mb-1.5 text-[10px] tracking-[0.16em] text-gold uppercase">{cat}</p>
               <div className="flex flex-wrap gap-1.5">
-                {items.map((l, i) => (
-                  <button
-                    key={cat + l.label + i}
-                    draggable
-                    onDragStart={(e) => e.dataTransfer.setData("text/cl-element", l.type)}
-                    onClick={() => addElement(l.type)}
-                    className="rounded-lg border border-line bg-night px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:border-gold hover:text-ink"
-                    title="Cliquer pour ajouter, ou glisser dans une section"
-                  >
-                    {l.label}
-                  </button>
-                ))}
+                {items.map((entry, index) => {
+                  if (entry.kind === "element") {
+                    const item = entry.item;
+                    return (
+                      <button
+                        key={`${cat}-element-${item.label}-${index}`}
+                        draggable
+                        onDragStart={(event) => event.dataTransfer.setData("text/cl-element", String(LIBRARY.indexOf(item)))}
+                        onClick={() => addElement(item)}
+                        className="w-full rounded-lg border border-line bg-night px-2.5 py-2 text-left text-[11px] text-muted transition-colors hover:border-gold hover:text-ink"
+                        title={item.description ?? "Cliquer pour ajouter, ou glisser dans une section"}
+                      >
+                        <span className="block font-medium">{item.label}</span>
+                        {item.description && <span className="mt-0.5 block text-[10px] leading-snug text-faint">{item.description}</span>}
+                      </button>
+                    );
+                  }
+                  if (entry.kind === "row") {
+                    return (
+                      <button
+                        key={entry.key}
+                        type="button"
+                        onClick={() => addRow(entry.preset)}
+                        disabled={device !== "desktop"}
+                        className="w-full rounded-lg border border-gold/40 bg-night px-2.5 py-2 text-left text-[11px] text-ink hover:border-gold disabled:cursor-not-allowed disabled:opacity-45"
+                      >
+                        {entry.label}
+                      </button>
+                    );
+                  }
+                  if (entry.kind === "group") {
+                    return (
+                      <button
+                        key="phase3b-group"
+                        type="button"
+                        onClick={groupSelection}
+                        disabled={activeMulti.length < 2 || device !== "desktop"}
+                        aria-label="Grouper les feuilles sélectionnées"
+                        title="Sélectionnez au moins deux feuilles racines sœurs avec Ctrl/Cmd + clic."
+                        className="w-full rounded-lg border border-gold/40 bg-night px-2.5 py-2 text-left text-[11px] text-ink hover:border-gold disabled:cursor-not-allowed disabled:opacity-45"
+                      >
+                        Groupe{activeMulti.length > 1 ? ` · ${activeMulti.length} sélectionnées` : ""}
+                      </button>
+                    );
+                  }
+                  return (
+                    <button
+                      key="phase3a-container"
+                      type="button"
+                      onClick={() => addContainer()}
+                      disabled={device !== "desktop"}
+                      title="Ajouter un conteneur libre à la section"
+                      className="w-full rounded-lg border border-line bg-night px-2.5 py-2 text-left text-[11px] text-muted hover:border-gold hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
+                    >
+                      ▣ Conteneur libre · Phase 3A
+                    </button>
+                  );
+                })}
               </div>
             </div>
           ))}
@@ -498,94 +1387,118 @@ export default function PageEditor({
         </aside>
 
         {/* Canvas */}
-        <div className="min-w-0 flex-1 overflow-auto bg-night/60 p-4">
-          <div className="mx-auto" style={{ width: Math.min(vpw, PAGE_WIDTH) }}>
-            {page.sections.map((s, si) => (
-              <div key={s.id} className="group/sec relative mb-3">
+        <div
+          ref={stageRef}
+          className={`min-w-0 flex-1 overflow-auto bg-night/60 p-4 ${spacePressed ? "cursor-grab" : ""}`}
+          onMouseDown={(event) => {
+            if (event.button === 1 || spacePressed) {
+              event.preventDefault();
+              panRef.current = { startX: event.clientX, startY: event.clientY, scrollLeft: stageRef.current?.scrollLeft ?? 0, scrollTop: stageRef.current?.scrollTop ?? 0 };
+            }
+          }}
+          onMouseUp={() => { panRef.current = null; }}
+        >
+          <div className="mx-auto w-max">
+            {page.sections.map((section, sectionIndex) => (
+              <div key={section.id} className="group/sec relative mb-3" style={{ width: PAGE_WIDTH * canvasScale }}>
                 <div className="absolute -top-7 left-0 z-20 flex items-center gap-1 opacity-0 transition-opacity group-hover/sec:opacity-100">
-                  <span className="rounded bg-raised px-2 py-0.5 text-[10px] text-faint">{initialSlug === "boutique" ? si === 0 ? "Éditorial avant les produits" : `Éditorial après les produits · ${si}` : `Section ${si + 1}`}</span>
-                  <button onClick={() => moveSection(s.id, -1)} className="rounded bg-raised px-1.5 text-[11px] text-muted hover:text-ink" title="Monter">↑</button>
-                  <button onClick={() => moveSection(s.id, 1)} className="rounded bg-raised px-1.5 text-[11px] text-muted hover:text-ink" title="Descendre">↓</button>
-                  <button onClick={() => duplicateSection(s.id)} className="rounded bg-raised px-1.5 text-[11px] text-muted hover:text-ink" title="Dupliquer">⧉</button>
-                  <button onClick={() => removeSection(s.id)} className="rounded bg-raised px-1.5 text-[11px] text-danger" title="Supprimer">×</button>
+                  <button type="button" onClick={() => selectSection(section.id)} className={`rounded px-2 py-0.5 text-[10px] ${sel?.sectionId === section.id && selIsSection ? "bg-gold/20 text-goldsoft" : "bg-raised text-faint"}`} title="Sélectionner les propriétés de la section">{initialSlug === "boutique" ? sectionIndex === 0 ? "Éditorial avant les produits" : `Éditorial après les produits · ${sectionIndex}` : `Section ${sectionIndex + 1}`}</button>
+                  <button onClick={() => moveSection(section.id, -1)} className="rounded bg-raised px-1.5 text-[11px] text-muted hover:text-ink" title="Monter">↑</button>
+                  <button onClick={() => moveSection(section.id, 1)} className="rounded bg-raised px-1.5 text-[11px] text-muted hover:text-ink" title="Descendre">↓</button>
+                  <button onClick={() => duplicateSection(section.id)} className="rounded bg-raised px-1.5 text-[11px] text-muted hover:text-ink" title="Dupliquer">⧉</button>
+                  <button onClick={() => removeSection(section.id)} className="rounded bg-raised px-1.5 text-[11px] text-danger" title="Supprimer">×</button>
                 </div>
                 <div
                   className="relative overflow-hidden rounded-lg border border-line"
-                  style={{ width: "100%", minHeight: s.h * (vpw / PAGE_WIDTH), background: s.bg }}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={(e) => {
-                    const t = e.dataTransfer.getData("text/cl-element");
-                    if (t) {
-                      e.preventDefault();
-                      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                      const x = Math.round(((e.clientX - rect.left) / rect.width) * PAGE_WIDTH - 60);
-                      const y = Math.round(((e.clientY - rect.top) / rect.height) * s.h - 30);
-                      addElement(t, s.id, x, y);
+                  style={{ width: PAGE_WIDTH * canvasScale, height: section.h * canvasScale, background: section.bg, outline: sel?.sectionId === section.id && selIsSection ? "2px solid #c9a86a" : undefined, outlineOffset: 2 }}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    const rawIndex = event.dataTransfer.getData("text/cl-element");
+                    const itemIndex = rawIndex ? Number(rawIndex) : Number.NaN;
+                    const item = Number.isInteger(itemIndex) ? LIBRARY[itemIndex] : undefined;
+                    if (item) {
+                      event.preventDefault();
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      let x = Math.round((event.clientX - rect.left) / canvasScale - 60);
+                      let y = Math.round((event.clientY - rect.top) / canvasScale - 30);
+                      const targetContainer = selContainer && sel?.sectionId === section.id ? selContainer : null;
+                      if (targetContainer) { x -= targetContainer.x; y -= targetContainer.y; }
+                      addElement(item, section.id, x, y);
                     }
                   }}
                 >
-                  <div style={{ width: PAGE_WIDTH, transform: `scale(${Math.min(1, vpw / PAGE_WIDTH)})`, transformOrigin: "top left", height: s.h }}>
-                    {[...s.elements]
-                      .sort((a, b) => a.z - b.z)
-                      .map((el) => {
-                        const isSel = sel?.elId === el.id;
+                  <div
+                    onMouseDown={(event) => { if (event.target === event.currentTarget) selectSection(section.id); }}
+                    style={{
+                      position: "absolute", left: 0, top: 0, width: PAGE_WIDTH, height: section.h,
+                      transform: `scale(${canvasScale})`, transformOrigin: "top left",
+                      backgroundImage: showGrid ? "linear-gradient(to right, rgba(201,168,106,.16) 1px, transparent 1px), linear-gradient(to bottom, rgba(201,168,106,.16) 1px, transparent 1px)" : undefined,
+                      backgroundSize: showGrid ? `${gridStep}px ${gridStep}px` : undefined,
+                    }}
+                  >
+                    {[...section.elements].sort((a, b) => a.z - b.z).map((node) => {
+                      const renderLeaf = (element: CmsElement, parentId?: string, flow = false, responsiveLocal = false) => {
+                        const effectiveElement = responsiveLocal || (!parentId && !flow) ? getCmsElementForBreakpoint(element, device) : element;
+                        const isSelected = sel?.sectionId === section.id && sel.elId === element.id;
+                        const isMultiSelected = activeMulti.some((item) => item.sectionId === section.id && item.elId === element.id);
+                        const isLocked = !!element.locked || cmsAncestors(section, element.id).some((parent) => parent.locked);
+                        const frameStyle = flow ? cmsFlowLeafRenderStyle(effectiveElement) : cmsLeafRenderStyle(effectiveElement);
                         return (
-                          <div
-                            key={el.id}
-                            onMouseDown={(e) => startDrag(e, s, el, "move")}
-                            onDoubleClick={() => el.type === "text" && setEditingText(el.id)}
-                            className="absolute cursor-move select-none"
-                            style={{
-                              left: el.x,
-                              top: el.y,
-                              width: el.w,
-                              height: el.h,
-                              zIndex: el.z,
-                              transform: el.rotation ? `rotate(${el.rotation}deg)` : undefined,
-                              opacity: el.opacity,
-                              outline: isSel ? "2px solid #c9a86a" : el.locked ? "1px dashed #6d6c7d" : "1px solid transparent",
-                              outlineOffset: 2,
-                              display: el.hidden ? "none" : undefined,
-                            }}
-                          >
-                            {editingText === el.id ? (
-                              <ContentEditableText
-                                value={(el.content?.text as string) ?? ""}
-                                onChange={(v) => setEl(s.id, el.id, { content: { ...el.content, text: v } })}
-                                onDone={() => setEditingText(null)}
-                                style={textStyleFor(el)}
-                              />
-                            ) : (
-                              <ElementViewLazy el={el} />
-                            )}
-                            {isSel && (
-                              <>
-                                {(["nw", "ne", "sw", "se"] as const).map((dir) => (
-                                  <span
-                                    key={dir}
-                                    onMouseDown={(e) => startDrag(e, s, el, "resize", dir)}
-                                    className="absolute z-30 h-3 w-3 rounded-full border border-gold bg-night"
-                                    style={handleStyle(dir)}
-                                    aria-hidden="true"
-                                  />
-                                ))}
-                                {(["n", "s", "e", "w"] as const).map((dir) => (
-                                  <span
-                                    key={dir}
-                                    onMouseDown={(e) => startDrag(e, s, el, "resize", dir)}
-                                    className="absolute z-30 h-3 w-3 rounded-full border border-gold/60 bg-night"
-                                    style={handleStyle(dir)}
-                                    aria-hidden="true"
-                                  />
-                                ))}
-                              </>
-                            )}
+                          <div key={element.id}
+                            onMouseDown={(event) => flow ? (event.stopPropagation(), selectNode({ sectionId: section.id, elId: element.id, parentId }, event, false)) : startDrag(event, section, element, "move", undefined, parentId)}
+                            onDoubleClick={() => !isLocked && element.type === "text" && setEditingText(element.id)}
+                            className={`select-none ${flow ? "relative w-full" : "absolute"} ${isLocked ? "cursor-not-allowed" : flow ? "cursor-default" : "cursor-move"}`}
+                            style={{ ...frameStyle, outline: isSelected || isMultiSelected ? "2px solid #c9a86a" : isLocked ? "1px dashed #6d6c7d" : "1px solid transparent", outlineOffset: 2 }}>
+                            {editingText === element.id ? <ContentEditableText value={(element.content?.text as string) ?? ""}
+                              onChange={(value) => setEl(section.id, element.id, { content: { ...element.content, text: value } })}
+                              onDone={() => setEditingText(null)} style={textStyleFor(effectiveElement)} /> : <ElementViewLazy el={effectiveElement} />}
+                            {isSelected && !isLocked && !flow && <>
+                              {(["nw", "ne", "sw", "se"] as const).map((direction) => <span key={direction} onMouseDown={(event) => startDrag(event, section, element, "resize", direction, parentId)} className="absolute z-30 h-3 w-3 rounded-full border border-gold bg-night" style={handleStyle(direction)} aria-hidden="true" />)}
+                              {(["n", "s", "e", "w"] as const).map((direction) => <span key={direction} onMouseDown={(event) => startDrag(event, section, element, "resize", direction, parentId)} className="absolute z-30 h-3 w-3 rounded-full border border-gold/60 bg-night" style={handleStyle(direction)} aria-hidden="true" />)}
+                            </>}
                           </div>
                         );
-                      })}
+                      };
+                      if (!isCmsStructuralNode(node)) return renderLeaf(node);
+                      const selected = sel?.sectionId === section.id && sel.elId === node.id;
+                      const locked = !!node.locked || cmsAncestors(section, node.id).some((parent) => parent.locked);
+                      if (isCmsRow(node)) return (
+                        <div key={node.id} data-cms-node="row" onMouseDown={(event) => startDrag(event, section, node, "move")}
+                          className={`absolute select-none ${locked ? "cursor-not-allowed" : "cursor-move"}`}
+                          style={{ ...cmsRowRenderStyle(node), outline: selected ? "2px solid #c9a86a" : "1px dashed rgba(201,168,106,.55)", outlineOffset: 2 }}>
+                          {node.children.map((column) => (
+                            <div key={column.id} data-cms-node="column"
+                              onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); selectNode({ sectionId: section.id, elId: column.id, parentId: node.id }, event, false); }}
+                              className="relative min-w-0"
+                              style={{ ...cmsColumnRenderStyle(column, node), outline: sel?.elId === column.id ? "2px solid #c9a86a" : column.locked || locked ? "1px dashed #6d6c7d" : "1px dashed rgba(201,168,106,.2)", outlineOffset: -2 }}>
+                              {column.children.map((child) => renderLeaf(child, column.id, true))}
+                            </div>
+                          ))}
+                          {selected && !locked && <>
+                            {(["nw", "ne", "sw", "se"] as const).map((direction) => <span key={direction} onMouseDown={(event) => startDrag(event, section, node, "resize", direction)} className="absolute z-30 h-3 w-3 rounded-full border border-gold bg-night" style={handleStyle(direction)} aria-hidden="true" />)}
+                            {(["n", "s", "e", "w"] as const).map((direction) => <span key={direction} onMouseDown={(event) => startDrag(event, section, node, "resize", direction)} className="absolute z-30 h-3 w-3 rounded-full border border-gold/60 bg-night" style={handleStyle(direction)} aria-hidden="true" />)}
+                          </>}
+                        </div>
+                      );
+                      const freeNode = isCmsContainer(node) || isCmsGroup(node);
+                      const frameStyle = isCmsGroup(node) ? cmsGroupRenderStyle(node) : cmsContainerRenderStyle(node as CmsContainer);
+                      return <div key={node.id} data-cms-node={isCmsGroup(node) ? "group" : "container"}
+                        onMouseDown={(event) => startDrag(event, section, node, "move")}
+                        className={`absolute select-none ${locked ? "cursor-not-allowed" : "cursor-move"}`}
+                        style={{ ...frameStyle, outline: selected ? "2px solid #c9a86a" : "1px dashed rgba(201,168,106,.55)", outlineOffset: 2, overflow: "visible" }}>
+                        {freeNode && [...node.children].sort((a, b) => a.z - b.z).map((child) => renderLeaf(child, node.id, false, isCmsGroup(node)))}
+                        {selected && !locked && <>
+                          {(["nw", "ne", "sw", "se"] as const).map((direction) => <span key={direction} onMouseDown={(event) => startDrag(event, section, node, "resize", direction)} className="absolute z-30 h-3 w-3 rounded-full border border-gold bg-night" style={handleStyle(direction)} aria-hidden="true" />)}
+                          {(["n", "s", "e", "w"] as const).map((direction) => <span key={direction} onMouseDown={(event) => startDrag(event, section, node, "resize", direction)} className="absolute z-30 h-3 w-3 rounded-full border border-gold/60 bg-night" style={handleStyle(direction)} aria-hidden="true" />)}
+                        </>}
+                      </div>;
+                    })}
+                    {guideSectionId === section.id && guides.filter((guide) => guide.axis === "x").map((guide, index) => <div key={`gx-${index}`} aria-hidden="true" style={{ position: "absolute", zIndex: 9999, pointerEvents: "none", left: guide.position, top: 0, height: section.h, borderLeft: "1px dashed #f0c674" }} />)}
+                    {guideSectionId === section.id && guides.filter((guide) => guide.axis === "y").map((guide, index) => <div key={`gy-${index}`} aria-hidden="true" style={{ position: "absolute", zIndex: 9999, pointerEvents: "none", top: guide.position, left: 0, width: PAGE_WIDTH, borderTop: "1px dashed #f0c674" }} />)}
                   </div>
                 </div>
-                {initialSlug === "boutique" && si === 0 && (
+                {sel?.sectionId === section.id && selIsSection && <button type="button" aria-label={`Redimensionner la section ${sectionIndex + 1}`} title="Faire glisser pour redimensionner la section" onMouseDown={(event) => startSectionResize(event, section)} className="absolute bottom-[-7px] left-1/2 z-40 h-3 w-12 -translate-x-1/2 cursor-ns-resize rounded-full border border-night bg-gold shadow" />}
+                {initialSlug === "boutique" && sectionIndex === 0 && (
                   <div className="my-4 rounded-xl border border-dashed border-gold/40 bg-gold/5 px-4 py-3 text-center text-xs text-goldsoft">
                     Catalogue produits dynamique — affiché par le site, non stocké et non modifiable dans le CMS.
                   </div>
@@ -597,38 +1510,192 @@ export default function PageEditor({
 
         {/* Panneau de propriétés */}
         <aside className="w-72 shrink-0 overflow-y-auto border-l border-line bg-surface/60 p-4">
-          {sel && selEl && selSection ? (
-            <PropsPanel
-              el={selEl}
-              section={selSection}
-              device={device}
-              onChange={(patch) => setEl(selSection.id, selEl.id, patch)}
-              onChangeStyle={(patch) => setEl(selSection.id, selEl.id, { style: { ...selEl.style, ...patch } })}
-              onChangeContent={(patch) => setEl(selSection.id, selEl.id, { content: { ...selEl.content, ...patch } })}
-              onResponsive={(bp, patch) =>
-                setEl(selSection.id, selEl.id, { responsive: { ...selEl.responsive, [bp]: { ...(selEl.responsive?.[bp] ?? {}), ...patch } } })
-              }
-              onRemove={() => removeEl(selSection.id, selEl.id)}
-              onLock={() => setEl(selSection.id, selEl.id, { locked: !selEl.locked })}
-              onHide={() => setEl(selSection.id, selEl.id, { hidden: !selEl.hidden })}
-            />
+          <section className="mb-4 border-b border-line pb-4" aria-label="Structure et calques">
+            <p className="mb-2 text-xs tracking-[0.18em] text-gold uppercase">Structure / calques</p>
+            <div className="max-h-56 space-y-2 overflow-y-auto">
+              {page.sections.map((section, index) => (
+                <div key={section.id}>
+                  <button type="button" onClick={() => selectSection(section.id)} className={`mb-1 w-full rounded px-1 py-0.5 text-left text-[10px] ${sel?.sectionId === section.id && selIsSection ? "bg-gold/10 text-goldsoft" : "text-faint hover:text-ink"}`}>Section {index + 1} · {section.h}px</button>
+                  {[...section.elements].sort((left, right) => right.z - left.z).map((node) => {
+                    const selected = sel?.sectionId === section.id && sel.elId === node.id;
+                    const isMultiSelected = activeMulti.some((item) => item.sectionId === section.id && item.elId === node.id);
+                    const structural = isCmsStructuralNode(node);
+                    const hidden = structural ? !!node.hidden || cmsAncestors(section, node.id).some((parent) => parent.hidden) : resolveCmsElementForBreakpoint(node, device).hidden || cmsAncestors(section, node.id).some((parent) => parent.hidden);
+                    const locked = !!node.locked || cmsAncestors(section, node.id).some((parent) => parent.locked);
+                    const label = structural ? (isCmsRow(node) ? "↔ Rangée" : isCmsColumn(node) ? "▥ Colonne" : isCmsGroup(node) ? "◇ Groupe" : "▣ Conteneur") : node.type;
+                    const layerButton = (item: CmsNode, parentId?: string, multiEligible = false, indent = false) => {
+                      const itemSelected = sel?.sectionId === section.id && sel.elId === item.id;
+                      const itemMulti = activeMulti.some((entry) => entry.sectionId === section.id && entry.elId === item.id);
+                      const itemHidden = !!item.hidden || cmsAncestors(section, item.id).some((parent) => parent.hidden);
+                      const itemLocked = !!item.locked || cmsAncestors(section, item.id).some((parent) => parent.locked);
+                      return <div key={item.id} className={`mb-1 flex items-center gap-1 ${indent ? "ml-3" : ""}`}>
+                        <button type="button" onClick={(event) => selectNode({ sectionId: section.id, elId: item.id, parentId }, event, multiEligible)} className={`min-w-0 flex-1 rounded-lg border px-2 py-1.5 text-left text-[11px] ${itemSelected || itemMulti ? "border-gold bg-gold/10 text-ink" : "border-line text-muted hover:border-gold/50"}`}>
+                          <span className="flex items-center justify-between gap-1"><span className="truncate">{indent ? "↳ " : ""}{isCmsStructuralNode(item) ? (isCmsRow(item) ? "Rangée" : isCmsColumn(item) ? "Colonne" : isCmsGroup(item) ? "Groupe" : "Conteneur") : item.type} · {item.id.slice(0, 5)}</span><span className="shrink-0 text-[10px]">{itemHidden ? "Masqué" : "Visible"}{itemLocked ? " · 🔒" : ""}</span></span>
+                        </button>
+                        {isCmsStructuralNode(item) && <>
+                          <button type="button" aria-label={`${item.locked ? "Déverrouiller" : "Verrouiller"} ${label}`} title={item.locked ? "Déverrouiller" : "Verrouiller"} onClick={() => setStructure(section.id, item.id, { locked: !item.locked })} className="rounded border border-line px-1.5 py-1 text-[10px] text-muted">{item.locked ? "🔓" : "🔒"}</button>
+                          <button type="button" aria-label={`${item.hidden ? "Afficher" : "Masquer"} ${label}`} title={item.hidden ? "Afficher" : "Masquer"} onClick={() => setStructure(section.id, item.id, { hidden: !item.hidden })} className="rounded border border-line px-1.5 py-1 text-[10px] text-muted">{item.hidden ? "◉" : "◌"}</button>
+                        </>}
+                      </div>;
+                    };
+                    return <div key={node.id}>
+                      {layerButton(node, undefined, !structural)}
+                      {(isCmsContainer(node) || isCmsGroup(node)) && node.children.map((child) => layerButton(child, node.id, false, true))}
+                      {isCmsRow(node) && node.children.map((column) => <div key={column.id} className="ml-2">
+                        {layerButton(column, node.id, false, true)}
+                        {column.children.map((child, childIndex) => <div key={child.id} className="flex items-center gap-1">
+                          <div className="min-w-0 flex-1">{layerButton(child, column.id, false, true)}</div>
+                          <button type="button" title="Monter dans la colonne" aria-label="Monter dans la colonne" disabled={childIndex === 0 || locked || column.locked} onClick={() => reorderColumnChild(section.id, node.id, column.id, child.id, -1)} className="rounded border border-line px-1 py-1 text-[10px] text-muted disabled:opacity-30">↑</button>
+                          <button type="button" title="Descendre dans la colonne" aria-label="Descendre dans la colonne" disabled={childIndex === column.children.length - 1 || locked || column.locked} onClick={() => reorderColumnChild(section.id, node.id, column.id, child.id, 1)} className="rounded border border-line px-1 py-1 text-[10px] text-muted disabled:opacity-30">↓</button>
+                        </div>)}
+                      </div>)}
+                    </div>;
+                  })}
+                  {section.elements.length === 0 && <p className="text-[10px] text-faint">Aucun élément</p>}
+                </div>
+              ))}
+            </div>
+          </section>
+          {activeMulti.length > 1 && selSection ? (
+            <div>
+              <p className="mb-2 text-xs tracking-[0.18em] text-gold uppercase">Multi-sélection · {activeMultiElements.length}</p>
+              <p className="mb-3 text-[11px] leading-relaxed text-muted">Sélection de feuilles racines sœurs. Déplacez un élément sélectionné pour translater l’ensemble.</p>
+              <div className="mb-3 flex flex-wrap gap-2">
+                <button type="button" onClick={() => applyMultiPatch({ locked: !activeMultiElements.every((element) => element.locked) })} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted">{activeMultiElements.every((element) => element.locked) ? "Déverrouiller" : "Verrouiller"}</button>
+                <button type="button" onClick={() => applyMultiPatch({ hidden: !activeMultiElements.every((element) => element.hidden) })} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted">{activeMultiElements.every((element) => element.hidden) ? "Afficher" : "Masquer"}</button>
+                <button type="button" onClick={groupSelection} disabled={device !== "desktop"} className="rounded border border-gold px-2.5 py-1.5 text-xs text-gold disabled:opacity-40">Créer un groupe</button>
+                <button type="button" onClick={duplicateMulti} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted">Dupliquer</button>
+                <button type="button" onClick={removeMulti} className="rounded border border-danger/40 px-2.5 py-1.5 text-xs text-danger">Supprimer</button>
+              </div>
+              <button type="button" onClick={() => { setMultiSel([]); setSel(null); }} className="text-xs text-faint hover:text-ink">Effacer la sélection</button>
+            </div>
+          ) : sel && selSection && (selContainer || selRow || selGroup || selColumn) && device !== "desktop" ? (
+            <p className="rounded-lg border border-line p-3 text-xs text-muted">Les structures de la Phase 3B sont éditables sur Desktop uniquement. L’aperçu responsive des feuilles historiques reste inchangé.</p>
+          ) : sel && selRow && selSection ? (
+            <div>
+              <p className="mb-2 text-xs tracking-[0.18em] text-gold uppercase">Rangée horizontale</p>
+              <p className="mb-3 text-[11px] leading-relaxed text-muted">Les colonnes s’écoulent horizontalement ; leurs largeurs sont des pourcentages de la largeur disponible après le gap.</p>
+              <Field label="X (px)"><NumInput v={selRow.x} onChange={(v) => setStructure(selSection.id, selRow.id, { x: v })} /></Field>
+              <Field label="Y (px)"><NumInput v={selRow.y} onChange={(v) => setStructure(selSection.id, selRow.id, { y: v })} /></Field>
+              <Field label="Largeur (px)"><NumInput v={selRow.w} min={MIN_SIZE} onChange={(v) => setStructure(selSection.id, selRow.id, { w: Math.max(MIN_SIZE, v) })} /></Field>
+              <Field label="Hauteur (px)"><NumInput v={selRow.h} min={MIN_SIZE} onChange={(v) => setStructure(selSection.id, selRow.id, { h: Math.max(MIN_SIZE, v) })} /></Field>
+              <Field label="Gap entre colonnes (px)"><NumInput v={selRow.gap} min={0} max={128} onChange={(v) => setStructure(selSection.id, selRow.id, { gap: Math.min(128, Math.max(0, v)) })} /></Field>
+              <Field label="Alignement horizontal"><select className={inputCls} value={selRow.alignX} onChange={(event) => setStructure(selSection.id, selRow.id, { alignX: event.target.value as CmsRow["alignX"] })}><option value="start">Gauche</option><option value="center">Centre</option><option value="end">Droite</option><option value="between">Espace entre</option></select></Field>
+              <Field label="Alignement vertical"><select className={inputCls} value={selRow.alignY} onChange={(event) => setStructure(selSection.id, selRow.id, { alignY: event.target.value as CmsRow["alignY"] })}><option value="start">Haut</option><option value="center">Centre</option><option value="end">Bas</option></select></Field>
+              <Field label="Opacité (%)"><NumInput v={selRow.opacity * 100} min={0} max={100} onChange={(v) => setStructure(selSection.id, selRow.id, { opacity: Math.min(1, Math.max(0, v / 100)) })} /></Field>
+              <div className="my-3 flex flex-wrap gap-2">
+                <button type="button" onClick={() => setStructure(selSection.id, selRow.id, { locked: !selRow.locked })} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted">{selRow.locked ? "Déverrouiller" : "Verrouiller"}</button>
+                <button type="button" onClick={() => setStructure(selSection.id, selRow.id, { hidden: !selRow.hidden })} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted">{selRow.hidden ? "Afficher" : "Masquer"}</button>
+                <button type="button" onClick={() => duplicateEl(selSection.id, selRow.id)} disabled={selReadOnly} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted disabled:opacity-40">Dupliquer</button>
+                <button type="button" onClick={() => removeEl(selSection.id, selRow.id)} disabled={selReadOnly} className="rounded border border-danger/40 px-2.5 py-1.5 text-xs text-danger disabled:opacity-40">Supprimer</button>
+              </div>
+              {selRow.locked && <p className="text-[11px] text-goldsoft">La rangée verrouillée bloque les colonnes et toutes leurs feuilles.</p>}
+            </div>
+          ) : sel && selColumn && selSection && selParent && isCmsRow(selParent) ? (
+            <div>
+              <p className="mb-2 text-xs tracking-[0.18em] text-gold uppercase">Colonne · {selColumn.width.toFixed(2)} %</p>
+              <p className="mb-3 text-[11px] leading-relaxed text-muted">La largeur est calculée dans sa rangée. Les feuilles s’empilent selon leur ordre dans Structure / Calques, remplissent la colonne et conservent leur hauteur.</p>
+              <Field label="Largeur (%)"><NumInput v={selColumn.width} min={1} max={99} step={0.1} onChange={(v) => setColumnWidth(selSection.id, selParent.id, selColumn.id, v)} /></Field>
+              <Field label="Gap vertical (px)"><NumInput v={selColumn.gap} min={0} max={128} onChange={(v) => setStructure(selSection.id, selColumn.id, { gap: Math.min(128, Math.max(0, v)) })} /></Field>
+              <Field label="Opacité (%)"><NumInput v={selColumn.opacity * 100} min={0} max={100} onChange={(v) => setStructure(selSection.id, selColumn.id, { opacity: Math.min(1, Math.max(0, v / 100)) })} /></Field>
+              <div className="my-3 flex flex-wrap gap-2">
+                <button type="button" onClick={() => setStructure(selSection.id, selColumn.id, { locked: !selColumn.locked })} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted">{selColumn.locked ? "Déverrouiller" : "Verrouiller"}</button>
+                <button type="button" onClick={() => setStructure(selSection.id, selColumn.id, { hidden: !selColumn.hidden })} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted">{selColumn.hidden ? "Afficher" : "Masquer"}</button>
+                <button type="button" onClick={() => duplicateEl(selSection.id, selColumn.id)} disabled={selReadOnly} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted disabled:opacity-40">Dupliquer</button>
+                <button type="button" onClick={() => removeEl(selSection.id, selColumn.id)} disabled={selReadOnly || selParent.children.length <= 1} className="rounded border border-danger/40 px-2.5 py-1.5 text-xs text-danger disabled:opacity-40">Supprimer</button>
+              </div>
+              <p className="text-[11px] text-faint">Pour ajouter du contenu, gardez cette colonne sélectionnée puis choisissez un bloc dans la bibliothèque.</p>
+            </div>
+          ) : sel && selGroup && selSection ? (
+            <div>
+              <p className="mb-2 text-xs tracking-[0.18em] text-gold uppercase">Groupe libre</p>
+              <p className="mb-3 text-[11px] leading-relaxed text-muted">Le redimensionnement conserve les proportions des feuilles, leurs textes et leurs overrides responsive. Les enfants restent sélectionnables dans Calques.</p>
+              <Field label="X (px)"><NumInput v={selGroup.x} onChange={(v) => setStructure(selSection.id, selGroup.id, { x: v })} /></Field>
+              <Field label="Y (px)"><NumInput v={selGroup.y} onChange={(v) => setStructure(selSection.id, selGroup.id, { y: v })} /></Field>
+              <Field label="Largeur (px)"><NumInput v={selGroup.w} min={MIN_SIZE} onChange={(v) => setStructure(selSection.id, selGroup.id, { w: Math.max(MIN_SIZE, v) })} /></Field>
+              <Field label="Hauteur (px)"><NumInput v={selGroup.h} min={MIN_SIZE} onChange={(v) => setStructure(selSection.id, selGroup.id, { h: Math.max(MIN_SIZE, v) })} /></Field>
+              <Field label="Opacité (%)"><NumInput v={selGroup.opacity * 100} min={0} max={100} onChange={(v) => setStructure(selSection.id, selGroup.id, { opacity: Math.min(1, Math.max(0, v / 100)) })} /></Field>
+              <div className="my-3 flex flex-wrap gap-2">
+                <button type="button" onClick={() => setStructure(selSection.id, selGroup.id, { locked: !selGroup.locked })} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted">{selGroup.locked ? "Déverrouiller" : "Verrouiller"}</button>
+                <button type="button" onClick={() => setStructure(selSection.id, selGroup.id, { hidden: !selGroup.hidden })} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted">{selGroup.hidden ? "Afficher" : "Masquer"}</button>
+                <button type="button" onClick={() => duplicateEl(selSection.id, selGroup.id)} disabled={selReadOnly} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted disabled:opacity-40">Dupliquer</button>
+                <button type="button" onClick={() => removeEl(selSection.id, selGroup.id)} disabled={selReadOnly} className="rounded border border-danger/40 px-2.5 py-1.5 text-xs text-danger disabled:opacity-40">Supprimer</button>
+              </div>
+            </div>
+          ) : sel && selContainer && selSection ? (
+            <div>
+              <p className="mb-3 text-xs tracking-[0.18em] text-gold uppercase">Container libre</p>
+              <p className="mb-3 text-[11px] leading-relaxed text-muted">Ses enfants utilisent des coordonnées locales. Déplacer le container déplace tout son contenu ; le redimensionner ne met pas les enfants à l’échelle.</p>
+              <Field label="X (px)"><NumInput v={selContainer.x} onChange={(v) => setContainer(selSection.id, selContainer.id, { x: v })} /></Field>
+              <Field label="Y (px)"><NumInput v={selContainer.y} onChange={(v) => setContainer(selSection.id, selContainer.id, { y: v })} /></Field>
+              <Field label="Largeur (px)"><NumInput v={selContainer.w} min={MIN_SIZE} onChange={(v) => setContainer(selSection.id, selContainer.id, { w: Math.max(MIN_SIZE, v) })} /></Field>
+              <Field label="Hauteur (px)"><NumInput v={selContainer.h} min={MIN_SIZE} onChange={(v) => setContainer(selSection.id, selContainer.id, { h: Math.max(MIN_SIZE, v) })} /></Field>
+              <div className="my-3 flex gap-2">
+                <button type="button" onClick={() => setContainer(selSection.id, selContainer.id, { locked: !selContainer.locked })} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted">{selContainer.locked ? "Déverrouiller" : "Verrouiller"}</button>
+                <button type="button" onClick={() => setContainer(selSection.id, selContainer.id, { hidden: !selContainer.hidden })} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted">{selContainer.hidden ? "Afficher" : "Masquer"}</button>
+              </div>
+              <div className="mb-3 flex gap-2">
+                <button type="button" onClick={() => duplicateEl(selSection.id, selContainer.id)} disabled={selReadOnly} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted disabled:opacity-40">Dupliquer</button>
+                <button type="button" onClick={() => removeEl(selSection.id, selContainer.id)} disabled={selReadOnly} className="rounded border border-danger/40 px-2.5 py-1.5 text-xs text-danger disabled:opacity-40">Supprimer</button>
+              </div>
+              {selContainer.locked ? <p className="text-[11px] text-goldsoft">Déverrouillez ce container pour modifier ses enfants.</p> : <p className="text-[11px] text-faint">Pour ajouter un enfant, gardez le container sélectionné puis choisissez un élément dans la bibliothèque.</p>}
+            </div>
+          ) : sel && selEl && selSection && selParent && !isCmsGroup(selParent) && device !== "desktop" ? (
+            <p className="rounded-lg border border-line p-3 text-xs text-muted">Les feuilles de conteneur / colonne s’éditent sur Desktop uniquement.</p>
+          ) : sel && selEl && selSection && selReadOnly ? (
+            <p className="rounded-lg border border-line p-3 text-xs text-muted">Ce nœud appartient à un parent verrouillé. Sélectionnez et déverrouillez le parent dans Structure / Calques.</p>
+          ) : sel && selEl && selSection ? (
+            <>
+              {selParent && isCmsColumn(selParent) && <div className="mb-3 flex items-center gap-2 rounded-lg border border-line p-2 text-[11px] text-muted">
+                <span className="flex-1">Positionné dans le flux de la colonne · l’ordre se règle dans Calques.</span>
+                <button type="button" disabled={selParent.locked || cmsAncestors(selSection, selParent.id).some((parent) => parent.locked)} onClick={() => {
+                  const row = findCmsParentNode(selSection, selParent.id);
+                  if (row && isCmsRow(row)) reorderColumnChild(selSection.id, row.id, selParent.id, selEl.id, -1);
+                }} className="rounded border border-line px-1.5 py-1 disabled:opacity-30">↑</button>
+                <button type="button" disabled={selParent.locked || cmsAncestors(selSection, selParent.id).some((parent) => parent.locked)} onClick={() => {
+                  const row = findCmsParentNode(selSection, selParent.id);
+                  if (row && isCmsRow(row)) reorderColumnChild(selSection.id, row.id, selParent.id, selEl.id, 1);
+                }} className="rounded border border-line px-1.5 py-1 disabled:opacity-30">↓</button>
+              </div>}
+              <PropsPanel
+                el={selEl}
+                frame={getCmsElementFrameInBreakpoint(selEl, device)}
+                canvasWidth={vpw}
+                sectionHeight={selSection.h * vpw / PAGE_WIDTH}
+                fontSize={getCmsElementFontSizeInBreakpoint(selEl, device)}
+                device={device}
+                isBoutiquePage={initialSlug === "boutique"}
+                flowLayout={!!selParent && isCmsColumn(selParent)}
+                onChange={(patch) => setEl(selSection.id, selEl.id, patch)}
+                onChangeFrame={(patch) => setElAtDevice(selSection.id, selEl.id, patch)}
+                onChangeStyle={(patch) => setEl(selSection.id, selEl.id, { style: { ...selEl.style, ...patch } })}
+                onChangeContent={(patch) => setEl(selSection.id, selEl.id, { content: { ...selEl.content, ...patch } })}
+                onResponsive={(breakpoint, patch) => setElAtBreakpoint(selSection.id, selEl.id, breakpoint, patch)}
+                responsiveEnabled={!selParent || isCmsGroup(selParent)}
+                onFontSizeChange={(value) => device === "desktop"
+                  ? setEl(selSection.id, selEl.id, { style: { ...selEl.style, size: value } })
+                  : setElAtDevice(selSection.id, selEl.id, { fontSize: value })}
+                onRemove={() => removeEl(selSection.id, selEl.id)}
+                onLock={() => setEl(selSection.id, selEl.id, { locked: !selEl.locked })}
+              />
+            </>
           ) : selSection ? (
             <div>
               <p className="mb-3 text-xs tracking-[0.18em] text-gold uppercase">Section</p>
               <Field label="Hauteur (px)"><NumInput v={selSection.h} onChange={(v) => sectionProp(selSection.id, { h: Math.max(120, v) })} min={120} max={4000} /></Field>
               <Field label="Arrière-plan"><Input v={selSection.bg ?? ""} onChange={(v) => sectionProp(selSection.id, { bg: v })} /></Field>
-              <p className="mt-4 text-xs leading-relaxed text-faint">Sélectionnez un élément pour modifier ses propriétés. Double-clic sur un texte pour l'éditer directement.</p>
+              <p className="mt-4 text-xs leading-relaxed text-faint">Sélectionnez un élément pour modifier ses propriétés. Double-clic sur un texte pour l&apos;éditer directement.</p>
             </div>
           ) : (
             <div>
               <p className="mb-3 text-xs tracking-[0.18em] text-gold uppercase">Aide</p>
               <ul className="space-y-2 text-xs leading-relaxed text-muted">
-                <li>• Cliquez sur un élément de la bibliothèque pour l'ajouter (ou glissez-le dans une section).</li>
+                <li>• Cliquez sur un élément de la bibliothèque pour l&apos;ajouter (ou glissez-le dans une section).</li>
                 <li>• Déplacez librement, redimensionnez aux poignées dorées.</li>
                 <li>• Double-clic sur un texte = édition directe.</li>
                 <li>• Ctrl+Z annuler · Ctrl+D dupliquer · Suppr supprimer.</li>
-                <li>• ▲ / ▼ pour l'ordre d'affichage (devant / derrière).</li>
-                <li>• L'onglet Responsive ajuste la position par appareil.</li>
+                <li>• ▲ / ▼ pour l&apos;ordre d&apos;affichage (devant / derrière).</li>
+                <li>• L&apos;onglet Responsive ajuste la position par appareil.</li>
                 <li>• « Enregistrer » garde le brouillon · « Publier » rend la page visible.</li>
               </ul>
             </div>
@@ -740,47 +1807,153 @@ function ColorInput({ v, onChange }: { v: string; onChange: (v: string) => void 
   );
 }
 
+function MediaSelectButton({
+  onSelect, multiple = false, selectedUrls = [], title = "Choisir des images",
+}: { onSelect: (urls: string[]) => void; multiple?: boolean; selectedUrls?: string[]; title?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" onClick={() => setOpen(true)} className="rounded-lg border border-line px-3 py-2 text-[11px] text-muted hover:border-gold hover:text-ink">Importer depuis mon ordinateur…</button>
+        <button type="button" onClick={() => setOpen(true)} className="rounded-lg border border-line px-3 py-2 text-[11px] text-muted hover:border-gold hover:text-ink">Choisir dans la médiathèque</button>
+      </div>
+      <MediaPicker open={open} onClose={() => setOpen(false)} onSelect={onSelect} selectedUrls={selectedUrls} multiple={multiple} title={title} />
+    </>
+  );
+}
+
+function ImageListEditor({
+  value, onChange, title, primaryFirst = false,
+}: { value: unknown; onChange: (images: { src: string; alt?: string; caption?: string }[]) => void; title: string; primaryFirst?: boolean }) {
+  const images = Array.isArray(value) ? value.filter((item): item is { src: string; alt?: string; caption?: string } => !!item && typeof item === "object" && typeof (item as { src?: unknown }).src === "string") : [];
+  const replace = (index: number, patch: Partial<{ src: string; alt: string; caption: string }>) => onChange(images.map((item, i) => i === index ? { ...item, ...patch } : item));
+  const move = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= images.length) return;
+    const next = [...images];
+    [next[index], next[target]] = [next[target], next[index]];
+    onChange(next);
+  };
+  return (
+    <div className="space-y-2">
+      <p className="text-[11px] text-faint">{title} · jusqu’à 30 images. L’import ouvre la médiathèque, puis choisissez « Importer » dans sa fenêtre.</p>
+      <MediaSelectButton multiple title="Ajouter des images" onSelect={(urls) => {
+        const known = new Set(images.map((image) => image.src));
+        onChange([...images, ...urls.filter((url) => !known.has(url)).map((src) => ({ src, alt: "", caption: "" }))].slice(0, 30));
+      }} />
+      {!images.length && <p className="rounded-lg border border-dashed border-line p-3 text-xs text-faint">Aucune image sélectionnée.</p>}
+      {images.map((image, index) => (
+        <div key={`${image.src}-${index}`} className="rounded-lg border border-line bg-night/50 p-2.5">
+          {primaryFirst && index === 0 && <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-gold">Image principale · affichée en premier</p>}
+          <div className="flex gap-2">
+            <div className="h-14 w-16 shrink-0 overflow-hidden rounded bg-raised">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={image.src} alt="" className="h-full w-full object-cover" />
+            </div>
+            <div className="flex flex-wrap content-start gap-1">
+              <button type="button" title="Monter" disabled={index === 0} onClick={() => move(index, -1)} className="rounded border border-line px-2 py-1 text-[10px] text-muted disabled:opacity-40">↑</button>
+              <button type="button" title="Descendre" disabled={index === images.length - 1} onClick={() => move(index, 1)} className="rounded border border-line px-2 py-1 text-[10px] text-muted disabled:opacity-40">↓</button>
+              <MediaSelectButton title="Remplacer cette image" selectedUrls={[image.src]} onSelect={(urls) => { if (urls[0]) replace(index, { src: urls[0] }); }} />
+              <button type="button" onClick={() => onChange(images.filter((_, i) => i !== index))} className="rounded border border-danger/40 px-2 py-1 text-[10px] text-danger">Retirer</button>
+            </div>
+          </div>
+          <div className="mt-2 grid gap-2">
+            <Field label="Texte alternatif"><Input v={image.alt ?? ""} onChange={(alt) => replace(index, { alt })} /></Field>
+            <Field label="Légende"><Input v={image.caption ?? ""} onChange={(caption) => replace(index, { caption })} /></Field>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function VisualSpacingFields({ content, onChange }: { content: Record<string, any>; onChange: (patch: Record<string, unknown>) => void }) {
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      <Field label="Marge haute (px)"><NumInput v={content.marginTop ?? 0} onChange={(marginTop) => onChange({ marginTop })} min={0} max={240} /></Field>
+      <Field label="Marge basse (px)"><NumInput v={content.marginBottom ?? 0} onChange={(marginBottom) => onChange({ marginBottom })} min={0} max={240} /></Field>
+      <Field label="Marge interne (px)"><NumInput v={content.padding ?? 0} onChange={(padding) => onChange({ padding })} min={0} max={128} /></Field>
+    </div>
+  );
+}
+
 function PropsPanel({
-  el, onChange, onChangeStyle, onChangeContent, onResponsive, onRemove, onLock, onHide,
+  el, frame, canvasWidth, sectionHeight, fontSize, device, onChange, onChangeFrame, onChangeStyle, onChangeContent, onResponsive, onFontSizeChange, onRemove, onLock, isBoutiquePage, responsiveEnabled = true, flowLayout = false,
 }: {
   el: CmsElement;
-  section: CmsSection;
+  frame: ResponsiveFrame;
+  canvasWidth: number;
+  sectionHeight: number;
+  fontSize: number;
   device: Device;
+  isBoutiquePage: boolean;
+  responsiveEnabled?: boolean;
+  flowLayout?: boolean;
   onChange: (p: Partial<CmsElement>) => void;
+  onChangeFrame: (p: Partial<ResponsiveFrame>) => void;
   onChangeStyle: (p: Record<string, any>) => void;
   onChangeContent: (p: Record<string, any>) => void;
-  onResponsive: (bp: "tablet" | "mobile", p: Record<string, any>) => void;
+  onResponsive: (bp: Device, p: CmsBreakpointPatch) => void;
+  onFontSizeChange: (value: number) => void;
   onRemove: () => void;
   onLock: () => void;
-  onHide: () => void;
 }) {
   const s = el.style ?? {};
   const c = el.content ?? {};
+  const activeOverride = device === "desktop" ? undefined : el.responsive?.[device];
+  const hasFrameOverride = !!activeOverride && [activeOverride.x, activeOverride.y, activeOverride.w, activeOverride.h].some((value) => value !== undefined);
   const faqItems = Array.isArray(c.items) ? (c.items as { question: string; answer: string }[]) : [];
+  const menuItems = el.type === "menu" && Array.isArray(c.items) ? (c.items as { label: string; href: string }[]) : [];
+  const updateMenuItem = (index: number, patch: Partial<{ label: string; href: string }>) => {
+    const next = [...menuItems];
+    next[index] = { ...next[index], ...patch };
+    onChangeContent({ items: next });
+  };
   const updateFaqItem = (index: number, patch: Partial<{ question: string; answer: string }>) => {
     const next = [...faqItems];
     next[index] = { ...next[index], ...patch };
     onChangeContent({ items: next });
   };
-  const [pickerOpen, setPickerOpen] = useState(false);
   return (
     <div>
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs tracking-[0.18em] text-gold uppercase">{el.type}</p>
-        <div className="flex gap-1">
-          <button onClick={onLock} className={`rounded px-2 py-1 text-[11px] ${el.locked ? "bg-gold/15 text-gold" : "text-muted"}`}>{el.locked ? "🔒" : "🔓"}</button>
-          <button onClick={onHide} className={`rounded px-2 py-1 text-[11px] ${el.hidden ? "bg-gold/15 text-gold" : "text-muted"}`}>👁</button>
-          <button onClick={onRemove} className="rounded px-2 py-1 text-[11px] text-danger">Suppr.</button>
+        <div className="flex flex-wrap gap-1">
+          <button type="button" onClick={onLock} aria-pressed={!!el.locked} className={`rounded border px-2 py-1 text-[11px] ${el.locked ? "border-gold bg-gold/15 text-gold" : "border-line text-muted"}`}>Verrouillé · {el.locked ? "Oui" : "Non"}</button>
+          <button type="button" onClick={onRemove} disabled={!!el.locked} className="rounded border border-line px-2 py-1 text-[11px] text-danger disabled:opacity-40">Suppr.</button>
         </div>
       </div>
-
-      <p className="mb-1.5 text-[10px] tracking-[0.2em] text-faint uppercase">Position & taille</p>
-      <div className="mb-3 grid grid-cols-2 gap-2">
-        <Field label="X"><NumInput v={el.x} onChange={(v) => onChange({ x: v })} min={-200} max={PAGE_WIDTH} /></Field>
-        <Field label="Y"><NumInput v={el.y} onChange={(v) => onChange({ y: v })} min={-200} max={4000} /></Field>
-        <Field label="Largeur"><NumInput v={el.w} onChange={(v) => onChange({ w: Math.max(MIN_SIZE, v) })} min={MIN_SIZE} max={PAGE_WIDTH} /></Field>
-        <Field label="Hauteur"><NumInput v={el.h} onChange={(v) => onChange({ h: Math.max(MIN_SIZE, v) })} min={MIN_SIZE} max={4000} /></Field>
-      </div>
+      {el.hidden && <p className="mb-3 rounded-lg bg-gold/10 p-2 text-xs text-goldsoft">Élément masqué sur le canvas ; il reste administrable dans Structure / calques.</p>}
+      {el.locked && <p className="mb-3 rounded-lg bg-raised p-2 text-xs text-muted">Élément verrouillé. Déverrouillez-le pour modifier ses propriétés.</p>}
+      <fieldset disabled={!!el.locked} className="min-w-0 space-y-1 border-0 p-0 disabled:opacity-60">
+      {responsiveEnabled && <section className="mb-3 rounded-xl border border-line p-3" aria-label="Visibilité par appareil">
+        <p className="mb-2 text-[10px] tracking-[0.2em] text-faint uppercase">Visibilité par appareil</p>
+        {(["desktop", "tablet", "mobile"] as Device[]).map((breakpoint) => {
+          const hidden = resolveCmsElementForBreakpoint(el, breakpoint).hidden;
+          const label = breakpoint === "desktop" ? "Desktop" : breakpoint === "tablet" ? "Tablette" : "Mobile";
+          return <label key={breakpoint} className="flex items-center justify-between gap-2 py-1 text-xs text-muted">
+            <span>{hidden ? `Masquer sur ${label}` : `Afficher sur ${label}`}</span>
+            <input type="checkbox" checked={!hidden} aria-label={`${hidden ? "Afficher" : "Masquer"} sur ${label}`} onChange={(event) => onResponsive(breakpoint, { hidden: !event.target.checked })} className="accent-[#c9a86a]" />
+          </label>;
+        })}
+      </section>}
+      {flowLayout ? (
+        <div className="mb-3 rounded-lg border border-line p-2">
+          <p className="mb-2 text-[10px] tracking-[0.15em] text-faint uppercase">Flux vertical de la colonne</p>
+          <p className="mb-2 text-[10px] leading-relaxed text-faint">La largeur remplit le parent et l’ordre se règle dans Calques ; seule la hauteur est éditée ici.</p>
+          <Field label="Hauteur (px)"><NumInput v={frame.h} onChange={(v) => onChangeFrame({ h: Math.max(MIN_SIZE, v) })} min={MIN_SIZE} max={Math.max(4000, sectionHeight)} /></Field>
+        </div>
+      ) : (
+        <>
+          <p className="mb-1.5 text-[10px] tracking-[0.2em] text-faint uppercase">Position & taille · {device === "desktop" ? "Desktop" : device === "tablet" ? "Tablette" : "Mobile"}</p>
+          <div className="mb-3 grid grid-cols-2 gap-2">
+            <Field label="X"><NumInput v={frame.x} onChange={(v) => onChangeFrame({ x: v })} min={-200} max={canvasWidth} /></Field>
+            <Field label="Y"><NumInput v={frame.y} onChange={(v) => onChangeFrame({ y: v })} min={-200} max={Math.max(4000, sectionHeight)} /></Field>
+            <Field label="Largeur"><NumInput v={frame.w} onChange={(v) => onChangeFrame({ w: Math.max(MIN_SIZE, v) })} min={MIN_SIZE} max={canvasWidth} /></Field>
+            <Field label="Hauteur"><NumInput v={frame.h} onChange={(v) => onChangeFrame({ h: Math.max(MIN_SIZE, v) })} min={MIN_SIZE} max={Math.max(4000, sectionHeight)} /></Field>
+          </div>
+        </>
+      )}
       <div className="mb-3 grid grid-cols-2 gap-2">
         <Field label="Rotation (°)"><NumInput v={el.rotation} onChange={(v) => onChange({ rotation: v })} min={-180} max={180} /></Field>
         <Field label="Opacité"><NumInput v={el.opacity} onChange={(v) => onChange({ opacity: Math.min(1, Math.max(0.05, v / 100)) })} min={5} max={100} step={5} /></Field>
@@ -801,9 +1974,12 @@ function PropsPanel({
             </select>
           </Field>
           <div className="grid grid-cols-2 gap-2">
-            <Field label="Taille"><NumInput v={s.size ?? 16} onChange={(v) => onChangeStyle({ size: v })} min={8} max={160} /></Field>
+            <Field label={`Taille · ${device === "desktop" ? "Desktop" : device === "tablet" ? "Tablette" : "Mobile"}`}><NumInput v={fontSize} onChange={onFontSizeChange} min={device === "desktop" ? 8 : 1} max={160} /></Field>
             <Field label="Graisse"><NumInput v={s.weight ?? 400} onChange={(v) => onChangeStyle({ weight: v })} min={100} max={900} step={100} /></Field>
           </div>
+          {responsiveEnabled && device !== "desktop" && el.responsive?.[device]?.fontSize !== undefined && (
+            <button type="button" onClick={() => onResponsive(device, { fontSize: null })} className="mb-2 text-xs text-gold hover:underline">Réinitialiser la taille Desktop</button>
+          )}
           <div className="grid grid-cols-2 gap-2">
             <Field label="Couleur"><ColorInput v={s.color ?? "#ece9e2"} onChange={(v) => onChangeStyle({ color: v })} /></Field>
             <Field label="Alignement">
@@ -811,6 +1987,7 @@ function PropsPanel({
                 <option value="left">Gauche</option>
                 <option value="center">Centre</option>
                 <option value="right">Droite</option>
+                <option value="justify">Justifié</option>
               </select>
             </Field>
           </div>
@@ -824,23 +2001,17 @@ function PropsPanel({
       {el.type === "image" && (
         <>
           <p className="mb-1.5 mt-2 text-[10px] tracking-[0.2em] text-faint uppercase">Image</p>
-          <Field label="Source (médiathèque Blob)">
-            <div className="space-y-2">
-              <div className="flex gap-2">
-                <input className={inputCls} value={c.src ?? ""} placeholder="/images/… ou https://…blob…" onChange={(e) => onChangeContent({ src: e.target.value })} />
-                <button onClick={() => setPickerOpen(true)} className="shrink-0 rounded-full bg-gold px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-night hover:bg-goldsoft">
-                  Choisir
-                </button>
-              </div>
-              {c.src && (
-                <div className="overflow-hidden rounded-lg border border-line bg-night">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={c.src} alt="" className="aspect-video w-full object-cover" />
-                </div>
-              )}
-            </div>
-          </Field>
-          <Field label="Alt text"><Input v={c.alt ?? ""} onChange={(v) => onChangeContent({ alt: v })} /></Field>
+          <div className="space-y-2">
+            <p className="text-[11px] text-faint">Importer depuis votre ordinateur ou réutiliser une image de la médiathèque.</p>
+            <MediaSelectButton title="Choisir une image" selectedUrls={c.src ? [c.src] : []} onSelect={(urls) => { if (urls[0]) onChangeContent({ src: urls[0] }); }} />
+            <Field label="Référence média"><Input v={c.src ?? ""} onChange={(src) => onChangeContent({ src })} placeholder="Choisissez un média existant" /></Field>
+            {c.src && <div className="overflow-hidden rounded-lg border border-line bg-night">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={c.src} alt="" className="aspect-video w-full object-cover" />
+            </div>}
+          </div>
+          <Field label="Texte alternatif (alt)"><Input v={c.alt ?? ""} onChange={(alt) => onChangeContent({ alt })} /></Field>
+          <Field label="Légende"><Input v={c.caption ?? ""} onChange={(caption) => onChangeContent({ caption })} /></Field>
           <div className="grid grid-cols-2 gap-2">
             <Field label="Ajustement">
               <select className={inputCls} value={c.fit ?? "cover"} onChange={(e) => onChangeContent({ fit: e.target.value })}>
@@ -849,27 +2020,132 @@ function PropsPanel({
             </Field>
             <Field label="Rayon"><NumInput v={c.radius ?? 0} onChange={(v) => onChangeContent({ radius: v })} min={0} max={200} /></Field>
           </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Largeur (%)"><NumInput v={c.widthPercent ?? 100} onChange={(widthPercent) => onChangeContent({ widthPercent })} min={10} max={100} /></Field>
+            <Field label="Largeur max (px)"><NumInput v={c.maxWidthPx ?? 1200} onChange={(maxWidthPx) => onChangeContent({ maxWidthPx })} min={160} max={2400} step={20} /></Field>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Alignement"><select className={inputCls} value={c.align ?? "center"} onChange={(e) => onChangeContent({ align: e.target.value })}><option value="left">Gauche</option><option value="center">Centre</option><option value="right">Droite</option></select></Field>
+            <Field label="Ratio"><select className={inputCls} value={c.ratio ?? "auto"} onChange={(e) => onChangeContent({ ratio: e.target.value })}><option value="auto">Original</option><option value="1:1">1:1</option><option value="4:3">4:3</option><option value="16:9">16:9</option></select></Field>
+          </div>
           <div className="flex gap-4">
             <label className="flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={!!c.shadow} onChange={(e) => onChangeContent({ shadow: e.target.checked })} className="accent-[#c9a86a]" /> Ombre</label>
             <label className="flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={!!c.border} onChange={(e) => onChangeContent({ border: e.target.checked })} className="accent-[#c9a86a]" /> Bordure</label>
           </div>
-          <MediaPicker
-            open={pickerOpen}
-            onClose={() => setPickerOpen(false)}
-            onSelect={(urls) => {
-              if (urls[0]) onChangeContent({ src: urls[0] });
-              setPickerOpen(false);
-            }}
-            selectedUrls={c.src ? [c.src] : []}
-            title="Choisir une image"
-          />
+        </>
+      )}
+      {(el.type === "gallery" || el.type === "carousel" || el.type === "imageMarquee") && (
+        <>
+          <p className="mb-1.5 mt-2 text-[10px] tracking-[0.2em] text-faint uppercase">{el.type === "gallery" ? "Galerie" : el.type === "carousel" ? "Carrousel" : "Image défilante"}</p>
+          <ImageListEditor value={c.images} onChange={(images) => onChangeContent({ images })} title="Sélectionnez, remplacez et réordonnez les images." primaryFirst={el.type === "carousel"} />
+          {el.type === "gallery" && (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Colonnes"><NumInput v={c.columns ?? 3} onChange={(columns) => onChangeContent({ columns })} min={1} max={6} /></Field>
+                <Field label="Espacement (px)"><NumInput v={c.gap ?? 16} onChange={(gap) => onChangeContent({ gap })} min={0} max={64} /></Field>
+              </div>
+              <Field label="Ratio des images"><select className={inputCls} value={c.ratio ?? "4:3"} onChange={(e) => onChangeContent({ ratio: e.target.value })}><option value="auto">Original</option><option value="1:1">1:1</option><option value="4:3">4:3</option><option value="3:2">3:2</option><option value="16:9">16:9</option><option value="21:9">21:9</option></select></Field>
+              <label className="mb-2 flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={c.showCaptions !== false} onChange={(e) => onChangeContent({ showCaptions: e.target.checked })} className="accent-[#c9a86a]" /> Afficher les légendes</label>
+            </>
+          )}
+          {el.type === "carousel" && (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Durée par image (ms)"><NumInput v={c.speedMs ?? 5000} onChange={(speedMs) => onChangeContent({ speedMs })} min={1000} max={30000} step={500} /></Field>
+                <Field label="Rayon (px)"><NumInput v={c.radius ?? 16} onChange={(radius) => onChangeContent({ radius })} min={0} max={200} /></Field>
+              </div>
+              <div className="space-y-2">
+                {([["autoplay", "Lecture automatique"], ["loop", "Boucle"], ["showArrows", "Commandes précédent / suivant"], ["showIndicators", "Indicateurs"]] as const).map(([key, label]) => <label key={key} className="flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={c[key] !== false && (key !== "autoplay" || c[key] === true)} onChange={(e) => onChangeContent({ [key]: e.target.checked })} className="accent-[#c9a86a]" /> {label}</label>)}
+              </div>
+            </>
+          )}
+          {el.type === "imageMarquee" && (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Durée de boucle (s)"><NumInput v={c.speedSeconds ?? 32} onChange={(speedSeconds) => onChangeContent({ speedSeconds })} min={5} max={120} /></Field>
+                <Field label="Images visibles"><NumInput v={c.visibleCount ?? 4} onChange={(visibleCount) => onChangeContent({ visibleCount })} min={1} max={8} /></Field>
+                <Field label="Espacement (px)"><NumInput v={c.gap ?? 16} onChange={(gap) => onChangeContent({ gap })} min={0} max={64} /></Field>
+                <Field label="Rayon (px)"><NumInput v={c.radius ?? 12} onChange={(radius) => onChangeContent({ radius })} min={0} max={200} /></Field>
+              </div>
+              <Field label="Sens"><select className={inputCls} value={c.direction ?? "left"} onChange={(e) => onChangeContent({ direction: e.target.value })}><option value="left">Vers la gauche</option><option value="right">Vers la droite</option></select></Field>
+              <label className="mb-2 flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={c.pauseOnHover !== false} onChange={(e) => onChangeContent({ pauseOnHover: e.target.checked })} className="accent-[#c9a86a]" /> Pause au survol</label>
+            </>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Largeur max (px)"><NumInput v={c.maxWidthPx ?? 1120} onChange={(maxWidthPx) => onChangeContent({ maxWidthPx })} min={160} max={2400} step={20} /></Field>
+            <Field label="Rayon (px)"><NumInput v={c.radius ?? 12} onChange={(radius) => onChangeContent({ radius })} min={0} max={200} /></Field>
+          </div>
+          <Field label="Alignement"><select className={inputCls} value={c.align ?? "center"} onChange={(e) => onChangeContent({ align: e.target.value })}><option value="left">Gauche</option><option value="center">Centre</option><option value="right">Droite</option></select></Field>
+          <VisualSpacingFields content={c} onChange={onChangeContent} />
+        </>
+      )}
+      {el.type === "panorama" && (
+        <>
+          <p className="mb-1.5 mt-2 text-[10px] tracking-[0.2em] text-faint uppercase">Panorama horizontal · pas de 360°</p>
+          <MediaSelectButton title="Choisir le panorama" selectedUrls={c.src ? [c.src] : []} onSelect={(urls) => { if (urls[0]) onChangeContent({ src: urls[0] }); }} />
+          <Field label="Référence média"><Input v={c.src ?? ""} onChange={(src) => onChangeContent({ src })} placeholder="Choisissez une image panoramique" /></Field>
+          <Field label="Texte alternatif"><Input v={c.alt ?? ""} onChange={(alt) => onChangeContent({ alt })} /></Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Position initiale (%)"><NumInput v={c.initialPosition ?? 50} onChange={(initialPosition) => onChangeContent({ initialPosition })} min={0} max={100} /></Field>
+            <Field label="Vitesse (px/s)"><NumInput v={c.speedPxPerSecond ?? 24} onChange={(speedPxPerSecond) => onChangeContent({ speedPxPerSecond })} min={1} max={120} /></Field>
+          </div>
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={!!c.autoScroll} onChange={(e) => onChangeContent({ autoScroll: e.target.checked })} className="accent-[#c9a86a]" /> Défilement automatique</label>
+            <label className="flex items-center gap-2 text-xs text-muted"><input type="checkbox" checked={!!c.loop} onChange={(e) => onChangeContent({ loop: e.target.checked })} className="accent-[#c9a86a]" /> Boucle automatique</label>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Largeur max (px)"><NumInput v={c.maxWidthPx ?? 1120} onChange={(maxWidthPx) => onChangeContent({ maxWidthPx })} min={160} max={2400} step={20} /></Field>
+            <Field label="Rayon (px)"><NumInput v={c.radius ?? 12} onChange={(radius) => onChangeContent({ radius })} min={0} max={200} /></Field>
+          </div>
+          <Field label="Alignement"><select className={inputCls} value={c.align ?? "center"} onChange={(e) => onChangeContent({ align: e.target.value })}><option value="left">Gauche</option><option value="center">Centre</option><option value="right">Droite</option></select></Field>
+          <VisualSpacingFields content={c} onChange={onChangeContent} />
+        </>
+      )}
+      {el.type === "article" && (
+        <>
+          <p className="mb-1.5 mt-2 text-[10px] tracking-[0.2em] text-faint uppercase">Article éditorial</p>
+          <MediaSelectButton title="Choisir l’image de l’article" selectedUrls={c.src ? [c.src] : []} onSelect={(urls) => { if (urls[0]) onChangeContent({ src: urls[0] }); }} />
+          <Field label="Référence média"><Input v={c.src ?? ""} onChange={(src) => onChangeContent({ src })} placeholder="Image facultative" /></Field>
+          <Field label="Texte alternatif"><Input v={c.alt ?? ""} onChange={(alt) => onChangeContent({ alt })} /></Field>
+          <Field label="Titre"><Input v={c.title ?? ""} onChange={(title) => onChangeContent({ title })} /></Field>
+          <Field label="Sous-titre"><Input v={c.subtitle ?? ""} onChange={(subtitle) => onChangeContent({ subtitle })} /></Field>
+          <div className="space-y-2">
+            <p className="text-[11px] text-faint">Paragraphes</p>
+            {(Array.isArray(c.paragraphs) ? c.paragraphs : []).map((paragraph: string, index: number) => <div key={index} className="rounded-lg border border-line p-2"><div className="mb-1 flex items-center justify-between"><span className="text-[10px] text-faint">Paragraphe {index + 1}</span><button type="button" disabled={c.paragraphs.length <= 1} onClick={() => onChangeContent({ paragraphs: c.paragraphs.filter((_: string, i: number) => i !== index) })} className="text-[10px] text-danger disabled:opacity-40">Retirer</button></div><textarea rows={3} className={`${inputCls} resize-y`} value={paragraph ?? ""} onChange={(e) => { const paragraphs = [...c.paragraphs]; paragraphs[index] = e.target.value; onChangeContent({ paragraphs }); }} /></div>)}
+            <button type="button" disabled={!Array.isArray(c.paragraphs) || c.paragraphs.length >= 20} onClick={() => onChangeContent({ paragraphs: [...(Array.isArray(c.paragraphs) ? c.paragraphs : []), ""] })} className="w-full rounded-lg border border-dashed border-line px-3 py-2 text-xs text-muted disabled:opacity-40">+ Ajouter un paragraphe</button>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Image"><select className={inputCls} value={c.imagePosition ?? "left"} onChange={(e) => onChangeContent({ imagePosition: e.target.value })}><option value="left">À gauche</option><option value="right">À droite</option><option value="top">Au-dessus</option></select></Field>
+            <Field label="Alignement"><select className={inputCls} value={c.align ?? "left"} onChange={(e) => onChangeContent({ align: e.target.value })}><option value="left">Gauche</option><option value="center">Centre</option><option value="right">Droite</option></select></Field>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Espacement (px)"><NumInput v={c.spacing ?? 24} onChange={(spacing) => onChangeContent({ spacing })} min={0} max={96} /></Field>
+            <Field label="Largeur max (px)"><NumInput v={c.maxWidthPx ?? 1120} onChange={(maxWidthPx) => onChangeContent({ maxWidthPx })} min={160} max={2400} step={20} /></Field>
+          </div>
+          <Field label="Rayon (px)"><NumInput v={c.radius ?? 12} onChange={(radius) => onChangeContent({ radius })} min={0} max={200} /></Field>
+          <Field label="Libellé du bouton (facultatif)"><Input v={c.buttonLabel ?? ""} onChange={(buttonLabel) => onChangeContent({ buttonLabel })} /></Field>
+          {c.buttonLabel && <Field label="Lien du bouton"><Input v={c.buttonHref ?? ""} onChange={(buttonHref) => onChangeContent({ buttonHref })} placeholder="/page" /></Field>}
+          <VisualSpacingFields content={c} onChange={onChangeContent} />
         </>
       )}
       {el.type === "button" && (
         <>
           <p className="mb-1.5 mt-2 text-[10px] tracking-[0.2em] text-faint uppercase">Bouton</p>
           <Field label="Texte"><Input v={c.text ?? ""} onChange={(v) => onChangeContent({ text: v })} /></Field>
-          <Field label="Lien"><Input v={c.href ?? ""} onChange={(v) => onChangeContent({ href: v })} placeholder="/create" /></Field>
+          {isBoutiquePage ? (
+            <div>
+              <Field label="Destination (verrouillée)">
+                <input className={inputCls} value={c.href ?? "(à corriger)"} readOnly aria-readonly="true" />
+              </Field>
+              {c.href !== "/create" && (
+                <button type="button" onClick={() => onChangeContent({ href: "/create" })} className="mt-2 text-xs text-gold hover:underline">
+                  Rétablir la destination /create
+                </button>
+              )}
+            </div>
+          ) : (
+            <Field label="Lien"><Input v={c.href ?? ""} onChange={(v) => onChangeContent({ href: v })} placeholder="/create" /></Field>
+          )}
           <div className="grid grid-cols-2 gap-2">
             <Field label="Fond"><ColorInput v={s.bg ?? "#c9a86a"} onChange={(v) => onChangeStyle({ bg: v })} /></Field>
             <Field label="Survol"><ColorInput v={s.hoverBg ?? "#e3cfa4"} onChange={(v) => onChangeStyle({ hoverBg: v })} /></Field>
@@ -878,6 +2154,45 @@ function PropsPanel({
             <Field label="Texte (couleur)"><ColorInput v={s.color ?? "#06070c"} onChange={(v) => onChangeStyle({ color: v })} /></Field>
             <Field label="Rayon"><NumInput v={s.radius ?? 999} onChange={(v) => onChangeStyle({ radius: v })} min={0} max={999} /></Field>
           </div>
+        </>
+      )}
+      {el.type === "hero" && (
+        <>
+          <p className="mb-1.5 mt-2 text-[10px] tracking-[0.2em] text-faint uppercase">Hero marketing</p>
+          <Field label="Surtitre"><Input v={c.eyebrow ?? ""} onChange={(eyebrow) => onChangeContent({ eyebrow })} /></Field>
+          <Field label="Titre"><textarea rows={2} className={`${inputCls} resize-y`} value={c.title ?? ""} onChange={(event) => onChangeContent({ title: event.target.value })} /></Field>
+          <Field label="Sous-titre"><textarea rows={3} className={`${inputCls} resize-y`} value={c.subtitle ?? ""} onChange={(event) => onChangeContent({ subtitle: event.target.value })} /></Field>
+          <Field label="Visuel de fond"><MediaSelectButton title="Choisir le visuel du hero" selectedUrls={c.imageSrc ? [c.imageSrc] : []} onSelect={(urls) => { if (urls[0]) onChangeContent({ imageSrc: urls[0] }); }} /></Field>
+          <Field label="Texte alternatif"><Input v={c.imageAlt ?? ""} onChange={(imageAlt) => onChangeContent({ imageAlt })} /></Field>
+          <Field label="Libellé du bouton"><Input v={c.buttonLabel ?? ""} onChange={(buttonLabel) => onChangeContent({ buttonLabel })} /></Field>
+          {c.buttonLabel && <Field label="Lien du bouton"><Input v={c.buttonHref ?? ""} onChange={(buttonHref) => onChangeContent({ buttonHref })} placeholder="/boutique" /></Field>}
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Fond"><ColorInput v={s.bg ?? "#0c0e16"} onChange={(bg) => onChangeStyle({ bg })} /></Field>
+            <Field label="Accent"><ColorInput v={s.accent ?? "#c9a86a"} onChange={(accent) => onChangeStyle({ accent })} /></Field>
+          </div>
+        </>
+      )}
+      {el.type === "menu" && (
+        <>
+          <p className="mb-1.5 mt-2 text-[10px] tracking-[0.2em] text-faint uppercase">Menu de navigation</p>
+          <Field label="Orientation"><select className={inputCls} value={c.orientation ?? "horizontal"} onChange={(event) => onChangeContent({ orientation: event.target.value })}><option value="horizontal">Horizontale</option><option value="vertical">Verticale</option></select></Field>
+          <Field label="Libellé accessible"><Input v={c.ariaLabel ?? "Navigation"} onChange={(ariaLabel) => onChangeContent({ ariaLabel })} /></Field>
+          <div className="space-y-2">
+            {menuItems.map((item, index) => <div key={index} className="rounded-lg border border-line p-2">
+              <Field label={`Lien ${index + 1}`}><Input v={item.label ?? ""} onChange={(label) => updateMenuItem(index, { label })} placeholder="Boutique" /></Field>
+              <Field label="Destination"><Input v={item.href ?? ""} onChange={(href) => updateMenuItem(index, { href })} placeholder="/boutique" /></Field>
+              <button type="button" onClick={() => onChangeContent({ items: menuItems.filter((_, itemIndex) => itemIndex !== index) })} disabled={menuItems.length <= 1} className="text-[11px] text-danger disabled:opacity-40">Supprimer le lien</button>
+            </div>)}
+          </div>
+          <button type="button" onClick={() => onChangeContent({ items: [...menuItems, { label: "Nouveau lien", href: "/" }] })} disabled={menuItems.length >= 12} className="w-full rounded-lg border border-dashed border-line px-3 py-2 text-xs text-muted disabled:opacity-40">+ Ajouter un lien</button>
+          <Field label="Espacement (px)"><NumInput v={s.gap ?? 24} min={0} max={128} onChange={(gap) => onChangeStyle({ gap })} /></Field>
+        </>
+      )}
+      {el.type === "cart" && (
+        <>
+          <p className="mb-1.5 mt-2 text-[10px] tracking-[0.2em] text-faint uppercase">Panier existant</p>
+          <Field label="Libellé"><Input v={c.label ?? "Voir mon panier"} onChange={(label) => onChangeContent({ label })} /></Field>
+          <p className="text-[11px] leading-relaxed text-faint">Ce bloc ouvre le panier actuel. Il ne touche ni au checkout ni au paiement.</p>
         </>
       )}
       {(el.type === "product" || el.type === "productGrid") && (
@@ -952,26 +2267,33 @@ function PropsPanel({
           <Field label="Rayon"><NumInput v={s.radius ?? 0} onChange={(v) => onChangeStyle({ radius: v })} min={0} max={200} /></Field>
         </div>
       )}
-      {(el.type === "text" || el.type === "image") && (
+      {(el.type === "text" || el.type === "image") && !isBoutiquePage && (
         <Field label="Lien (optionnel)"><Input v={el.link ?? ""} onChange={(v) => onChange({ link: v || undefined })} placeholder="/page" /></Field>
       )}
+      {isBoutiquePage && ((el.type === "text" && c.variant === "link") || (typeof el.link === "string" && !!el.link.trim())) && (
+        <button
+          type="button"
+          onClick={() => {
+            if (el.type === "text" && c.variant === "link") onChangeContent({ variant: "p" });
+            onChange({ link: undefined });
+          }}
+          className="mt-2 text-xs text-gold hover:underline"
+        >
+          Retirer ce lien éditorial
+        </button>
+      )}
 
-      {/* Responsive */}
       <div className="mt-4 rounded-xl border border-line p-3">
-        <p className="mb-2 text-[10px] tracking-[0.2em] text-faint uppercase">Responsive (override)</p>
-        {(["tablet", "mobile"] as const).map((bp) => (
-          <div key={bp} className="mb-2 grid grid-cols-4 gap-1.5">
-            <Field label={bp === "tablet" ? "Tab. X" : "Mob. X"}><NumInput v={el.responsive?.[bp]?.x ?? el.x} onChange={(v) => onResponsive(bp, { x: v })} /></Field>
-            <Field label={bp === "tablet" ? "Tab. Y" : "Mob. Y"}><NumInput v={el.responsive?.[bp]?.y ?? el.y} onChange={(v) => onResponsive(bp, { y: v })} /></Field>
-            <Field label="L."><NumInput v={el.responsive?.[bp]?.w ?? el.w} onChange={(v) => onResponsive(bp, { w: v })} min={MIN_SIZE} /></Field>
-            <label className="flex flex-col justify-end pb-1 text-[10px] text-faint">
-              Cacher
-              <input type="checkbox" checked={el.responsive?.[bp]?.hidden ?? false} onChange={(e) => onResponsive(bp, { hidden: e.target.checked })} className="accent-[#c9a86a]" />
-            </label>
-          </div>
-        ))}
-        <p className="text-[10px] leading-relaxed text-faint">Laissez vide pour hériter de la position desktop.</p>
+        <p className="mb-1 text-[10px] tracking-[0.2em] text-faint uppercase">Responsive actif</p>
+        <p className="text-xs leading-relaxed text-muted">
+          {device === "desktop" ? "Les propriétés X, Y, largeur, hauteur et taille de police modifient Desktop." : `X, Y, largeur, hauteur et taille de police modifient uniquement ${device === "tablet" ? "Tablette" : "Mobile"}. Les valeurs sans override héritent du Desktop, adaptées à la largeur de référence.`}
+        </p>
+        <p className="mt-2 text-[10px] leading-relaxed text-faint">Le contenu, la rotation, l’opacité et les autres styles sans stockage responsive restent partagés entre les appareils.</p>
+        {responsiveEnabled && device !== "desktop" && hasFrameOverride && (
+          <button type="button" onClick={() => onResponsive(device, { x: null, y: null, w: null, h: null })} className="mt-2 text-xs text-gold hover:underline">Réinitialiser les dimensions de ce mode</button>
+        )}
       </div>
+      </fieldset>
     </div>
   );
 }

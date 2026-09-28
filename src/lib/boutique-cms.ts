@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { pages } from "@/db/schema";
-import { newId, type CmsElement, type CmsPage, type CmsSection } from "@/lib/cms";
+import { isCmsContainer, isCmsStructuralNode, newId, type CmsElement, type CmsPage, type CmsSection } from "@/lib/cms";
 
 function textElement({
   text,
@@ -105,6 +105,32 @@ export function hasBoutiqueProductBlocks(value: unknown): boolean {
   return Object.values(record).some(hasBoutiqueProductBlocks);
 }
 
+/** Boutique may expose only its fixed CTA destination; free CMS navigation is rejected. */
+export function hasBoutiqueUnsafeNavigation(value: unknown): boolean {
+  const navigationFields = new Set(["link", "href", "buttonHref", "contactHref"]);
+
+  const visit = (current: unknown, allowCreateHref = false): boolean => {
+    if (Array.isArray(current)) return current.some((item) => visit(item));
+    if (!current || typeof current !== "object") return false;
+
+    const record = current as Record<string, unknown>;
+    for (const [key, child] of Object.entries(record)) {
+      if (navigationFields.has(key) && child !== undefined && child !== null && child !== "") {
+        if (!(allowCreateHref && key === "href" && child === "/create")) return true;
+      }
+
+      if (key === "content" && record.type === "button") {
+        if (visit(child, true)) return true;
+      } else if (visit(child)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  return visit(value);
+}
+
 export function isValidBoutiqueCmsPage(value: unknown): value is CmsPage {
   if (!value || typeof value !== "object") return false;
   const sections = (value as CmsPage).sections;
@@ -112,6 +138,7 @@ export function isValidBoutiqueCmsPage(value: unknown): value is CmsPage {
   return sections.every((section) => {
     if (!section || typeof section.id !== "string" || !Number.isFinite(section.h) || !Array.isArray(section.elements)) return false;
     return section.elements.every((element) =>
+      !isCmsStructuralNode(element) &&
       element &&
       typeof element.id === "string" &&
       typeof element.type === "string" &&

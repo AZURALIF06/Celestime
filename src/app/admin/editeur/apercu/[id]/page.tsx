@@ -6,11 +6,12 @@ import { PageCanvas } from "@/app/p/[slug]/page-canvas";
 import { BoutiqueCmsLayout } from "@/components/page/boutique-cms-layout";
 import { CommentCaMarcheCmsLayout } from "@/components/page/comment-ca-marche-cms-layout";
 import { LivraisonCmsContent } from "@/components/page/livraison-cms-content";
+import CmsResponsivePreview from "@/components/admin/cms-responsive-preview";
 import { db } from "@/db";
 import { pages } from "@/db/schema";
 import { getProducts } from "@/lib/catalog";
 import { requireAdmin } from "@/lib/auth";
-import { emptyPage, type CmsPage } from "@/lib/cms";
+import { emptyPage, hasCmsStructuralNodes, isValidGenericCmsPage, type CmsPage } from "@/lib/cms";
 import { isValidBoutiqueCmsPage } from "@/lib/boutique-cms";
 import { isValidCommentCaMarcheCmsPage } from "@/lib/comment-ca-marche-cms";
 import { isValidLivraisonCmsPage } from "@/lib/livraison-cms";
@@ -25,6 +26,7 @@ export default async function AdminDraftPreview({ params }: { params: Promise<{ 
 
   const draft = (row.draft as unknown as CmsPage) ?? emptyPage();
   const boutiqueProducts = row.slug === "boutique" ? (await getProducts()).filter((product) => product.status === "active") : [];
+  const validGenericDraft = !["boutique", "comment-ca-marche", "livraison", "accueil", "faq"].includes(row.slug) && (!hasCmsStructuralNodes(draft) || isValidGenericCmsPage(draft));
   const validBoutiqueDraft = row.slug === "boutique" && isValidBoutiqueCmsPage(draft);
   const validCommentCaMarcheDraft = row.slug === "comment-ca-marche" && isValidCommentCaMarcheCmsPage(draft);
   const validLivraisonDraft = row.slug === "livraison" && isValidLivraisonCmsPage(draft);
@@ -62,10 +64,14 @@ export default async function AdminDraftPreview({ params }: { params: Promise<{ 
           ) : (
             <p role="alert" className="rounded-xl border border-danger/30 bg-danger/5 p-4 text-sm text-danger">Brouillon Livraison incomplet ou invalide.</p>
           )
-        ) : (
+        ) : row.slug === "accueil" || row.slug === "faq" ? (
           <div className="overflow-hidden rounded-xl border border-line">
             <PageCanvas page={draft} products={[]} />
           </div>
+        ) : validGenericDraft ? (
+          <CmsResponsivePreview page={draft} />
+        ) : (
+          <p role="alert" className="rounded-xl border border-danger/30 bg-danger/5 p-4 text-sm text-danger">Brouillon générique invalide : il n’est pas rendu dans l’aperçu.</p>
         )}
       </div>
     </AdminShell>

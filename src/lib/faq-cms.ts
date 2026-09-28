@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { pages } from "@/db/schema";
-import { newId, type CmsElement, type CmsPage } from "@/lib/cms";
+import { isCmsContainer, isCmsStructuralNode, isValidGenericCmsPage, newId, type CmsElement, type CmsPage } from "@/lib/cms";
 import { FAQ_CONTENT } from "@/lib/faq-content";
 
 export interface CmsFaqItem {
@@ -41,10 +41,24 @@ export function findFaqElement(data: unknown): CmsElement | null {
   if (!data || typeof data !== "object" || !Array.isArray((data as CmsPage).sections)) return null;
   for (const section of (data as CmsPage).sections) {
     if (!Array.isArray(section.elements)) continue;
-    const faq = section.elements.find((element) => element.type === "faq");
+    const faq = section.elements.find((element): element is CmsElement => !isCmsStructuralNode(element) && element.type === "faq");
     if (faq && Array.isArray(faq.content?.items)) return faq;
   }
   return null;
+}
+
+/** Validate the complete CMS page and require usable FAQ questions before publication. */
+export function isValidFaqCmsPage(value: unknown): value is CmsPage {
+  if (!isValidGenericCmsPage(value)) return false;
+
+  const faq = findFaqElement(value);
+  const items = faq?.content.items;
+  return Array.isArray(items) && items.length > 0 && items.every((item: unknown) => {
+    if (!item || typeof item !== "object") return false;
+    const entry = item as { question?: unknown; answer?: unknown };
+    return typeof entry.question === "string" && !!entry.question.trim() &&
+      typeof entry.answer === "string" && !!entry.answer.trim();
+  });
 }
 
 export function resolvePublishedFaq(status: string, published: unknown): { page: CmsPage; element: CmsElement } | null {

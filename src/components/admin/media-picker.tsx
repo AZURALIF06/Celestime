@@ -42,7 +42,7 @@ export default function MediaPicker({
   const [items, setItems] = useState<MediaItem[]>([]);
   const [q, setQ] = useState("");
   const [uploading, setUploading] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set(selectedUrls));
+  const [selection, setSelection] = useState<{ key: string; urls: Set<string> }>(() => ({ key: "closed", urls: new Set(selectedUrls) }));
   const [copied, setCopied] = useState<string | null>(null);
   const [storageReady, setStorageReady] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +50,9 @@ export default function MediaPicker({
   // l'image silencieusement.
   const [failedThumbs, setFailedThumbs] = useState<Set<string>>(new Set());
   const fileRef = useRef<HTMLInputElement>(null);
+  const selectedUrlsKey = selectedUrls.join("\u0000");
+  const selectionKey = `${open ? "open" : "closed"}:${selectedUrlsKey}`;
+  const selected = selection.key === selectionKey ? selection.urls : new Set(selectedUrlsKey ? selectedUrlsKey.split("\u0000") : []);
 
   const markThumbFailed = useCallback((id: string) => {
     setFailedThumbs((prev) => {
@@ -77,11 +80,13 @@ export default function MediaPicker({
   }, []);
 
   useEffect(() => {
-    if (open) {
-      load();
-      setSelected(new Set(selectedUrls));
-    }
-  }, [open, load, selectedUrls]);
+    if (!open) return;
+    const timer = window.setTimeout(() => {
+      setSelection({ key: selectionKey, urls: new Set(selectedUrlsKey ? selectedUrlsKey.split("\u0000") : []) });
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [open, load, selectionKey, selectedUrlsKey]);
 
   // Fermer avec Escape
   useEffect(() => {
@@ -98,6 +103,7 @@ export default function MediaPicker({
     setUploading(true);
     setError(null);
     const errors: string[] = [];
+    const uploadedUrls: string[] = [];
 
     // Contrôles côté client AVANT l'envoi (format + taille), messages explicites.
     const sendable = Array.from(files).filter((file) => {
@@ -138,15 +144,30 @@ export default function MediaPicker({
           );
           continue;
         }
-        const inserted = Array.isArray(data.items) ? data.items.length : 0;
-        if (inserted === 0) {
+        const insertedItems = Array.isArray(data.items) ? data.items : [];
+        if (insertedItems.length === 0) {
           errors.push(`${file.name} : aucun fichier enregistré côté serveur`);
           continue;
+        }
+        for (const item of insertedItems) {
+          const url = item?.displayUrl ?? item?.url ?? item?.path;
+          if (typeof url === "string" && url) uploadedUrls.push(url);
         }
       }
     } finally {
       setUploading(false);
       await load();
+      if (uploadedUrls.length) {
+        setSelection((previous) => {
+          const current = previous.key === selectionKey ? previous.urls : new Set(selectedUrlsKey ? selectedUrlsKey.split("\u0000") : []);
+          const next = multiple ? new Set(current) : new Set<string>();
+          for (const url of uploadedUrls) {
+            next.add(url);
+            if (!multiple) break;
+          }
+          return { key: selectionKey, urls: next };
+        });
+      }
       if (fileRef.current) fileRef.current.value = "";
       // `load()` réinitialise l'erreur : ré-afficher le bilan après le
       // rechargement, sinon l'échec d'upload disparaissait aussitôt.
@@ -155,8 +176,9 @@ export default function MediaPicker({
   };
 
   const toggleSelect = (url: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
+    setSelection((previous) => {
+      const current = previous.key === selectionKey ? previous.urls : new Set(selectedUrlsKey ? selectedUrlsKey.split("\u0000") : []);
+      const next = new Set(current);
       if (multiple) {
         if (next.has(url)) next.delete(url);
         else next.add(url);
@@ -164,7 +186,7 @@ export default function MediaPicker({
         next.clear();
         next.add(url);
       }
-      return next;
+      return { key: selectionKey, urls: next };
     });
   };
 
@@ -200,7 +222,7 @@ export default function MediaPicker({
               disabled={uploading}
               className="rounded-full bg-gold px-5 py-2 text-xs font-medium tracking-[0.14em] text-night uppercase hover:bg-goldsoft disabled:opacity-50"
             >
-              {uploading ? "Envoi…" : "+ Importer"}
+              {uploading ? "Envoi…" : "+ Importer depuis mon ordinateur"}
             </button>
             <button
               onClick={onClose}
@@ -340,8 +362,8 @@ export default function MediaPicker({
 
         {/* Footer compat */}
         <div className="border-t border-line bg-night/30 px-5 py-3 text-[11px] text-faint">
-          Compatible avec les images existantes <code className="rounded bg-raised px-1 py-0.5">/images/…</code> ; les nouvelles images sont servies par{" "}
-          <code className="rounded bg-raised px-1 py-0.5">/api/media/&lt;id&gt;</code>. Les URLs sont stockées dans <code>products.images[]</code>.
+          Compatible avec les images existantes <code className="rounded bg-raised px-1 py-0.5">/images/…</code> ; les nouveaux médias sont servis par{" "}
+          <code className="rounded bg-raised px-1 py-0.5">/api/media/&lt;id&gt;</code>. La référence reste dans le contenu qui utilise le média.
         </div>
       </div>
     </div>

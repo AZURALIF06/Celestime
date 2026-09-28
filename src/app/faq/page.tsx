@@ -3,6 +3,7 @@ import Link from "next/link";
 import { ElementView } from "@/components/page/element-view";
 import { FAQ_CONTENT } from "@/lib/faq-content";
 import { getPublishedFaq } from "@/lib/faq-cms";
+import { isCmsContainer, isCmsStructuralNode, type CmsElement } from "@/lib/cms";
 
 export const dynamic = "force-dynamic";
 
@@ -75,6 +76,9 @@ export default async function FaqPage() {
   return (
     <main className="mx-auto max-w-3xl px-4 py-14 sm:px-6">
       <ElementView el={cmsFaq.element} />
+      {cmsFaq.page.sections.flatMap((section) => section.elements)
+        .filter((element): element is CmsElement => !isCmsStructuralNode(element) && element.type === "text" && element.content?.role === "editorialBlock")
+        .map((element) => <div key={element.id} className="mt-6"><ElementView el={element} /></div>)}
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: faqStructuredData(items) }} />
     </main>
   );

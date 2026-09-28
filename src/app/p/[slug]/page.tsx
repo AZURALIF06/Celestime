@@ -3,26 +3,38 @@ import { notFound, redirect } from "next/navigation";
 import { db } from "@/db";
 import { pages } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { getProducts, type DbProduct } from "@/lib/catalog";
+import { getCmsPageMetadata, isValidGenericCmsPage, safelyReadCmsPage } from "@/lib/cms";
 import { PageCanvas } from "./page-canvas";
-import type { CmsPage } from "@/lib/cms";
 
 export const dynamic = "force-dynamic";
-export const metadata: Metadata = { title: "Page Célestime" };
 
-export default async function CmsPage({ params }: { params: Promise<{ slug: string }> }) {
+type RouteProps = { params: Promise<{ slug: string }> };
+
+export async function generateMetadata({ params }: RouteProps): Promise<Metadata> {
+  const { slug } = await params;
+  if (slug === "accueil") return {};
+
+  const rows = await safelyReadCmsPage(() => db.select().from(pages).where(eq(pages.slug, slug)).limit(1));
+  const page = rows?.[0];
+  if (!page || page.status !== "published" || !page.published) return {};
+  if (!isValidGenericCmsPage(page.published, { forRendering: true })) return {};
+  return getCmsPageMetadata(page.seo);
+}
+
+export default async function CmsPage({ params }: RouteProps) {
   const { slug } = await params;
   if (slug === "accueil") redirect("/");
-  const rows = await db.select().from(pages).where(eq(pages.slug, slug)).limit(1);
-  const page = rows[0];
+
+  const rows = await safelyReadCmsPage(() => db.select().from(pages).where(eq(pages.slug, slug)).limit(1));
+  const page = rows?.[0];
   if (!page || page.status !== "published" || !page.published) notFound();
-  const data = page.published as unknown as CmsPage;
-  const seo = (page.seo ?? {}) as { title?: string; description?: string; noindex?: boolean; ogImage?: string };
-  const products: DbProduct[] = await getProducts();
+
+  // Invalid persisted JSON, including old commerce blocks, is never allowed into the canvas.
+  if (!isValidGenericCmsPage(page.published, { forRendering: true })) notFound();
 
   return (
     <main>
-      <PageCanvas page={data} products={products} />
+      <PageCanvas page={page.published} products={[]} bp="auto" genericSafety />
     </main>
   );
 }

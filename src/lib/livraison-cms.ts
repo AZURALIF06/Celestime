@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { pages } from "@/db/schema";
-import { newId, type CmsElement, type CmsPage, type CmsSection } from "@/lib/cms";
+import { isCmsContainer, isCmsStructuralNode, newId, type CmsElement, type CmsPage, type CmsSection } from "@/lib/cms";
 
 export const LIVRAISON_CONTENT_ROLES = [
   { headingRole: "shippingHeading", bodyRole: "shippingBody" },
@@ -110,7 +110,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function livraisonRole(page: CmsPage, role: string): CmsElement | null {
-  const matches = page.sections.flatMap((item) => item.elements).filter((element) => element.content?.role === role);
+  const matches = page.sections.flatMap((item) => item.elements).filter((element): element is CmsElement => !isCmsStructuralNode(element) && element.content?.role === role);
   return matches.length === 1 ? matches[0] : null;
 }
 
