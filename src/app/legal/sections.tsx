@@ -1,24 +1,32 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-function LegalShell({
+export function LegalShell({
   title,
   updated,
   children,
+  eyebrow = "Informations légales",
+  updatedLabel = "Dernière mise à jour :",
+  contactText = "Une question sur ces conditions ? Contactez-nous.",
+  contactHref = "/contact",
 }: {
   title: string;
   updated: string;
   children: React.ReactNode;
+  eyebrow?: string;
+  updatedLabel?: string;
+  contactText?: string;
+  contactHref?: string;
 }) {
   return (
     <div className="mx-auto max-w-3xl px-4 py-14 sm:px-6">
-      <p className="text-[11px] tracking-[0.3em] text-gold uppercase">Informations légales</p>
+      <p className="text-[11px] tracking-[0.3em] text-gold uppercase">{eyebrow}</p>
       <h1 className="mt-3 font-display text-5xl text-ink">{title}</h1>
-      <p className="mt-2 text-xs text-faint">Dernière mise à jour : {updated}</p>
+      <p className="mt-2 text-xs text-faint">{updatedLabel} {updated}</p>
       <div className="prose-invert mt-10 space-y-6 text-sm leading-relaxed text-muted [&_h2]:font-display [&_h2]:mt-8 [&_h2]:text-2xl [&_h2]:text-ink [&_p]:leading-relaxed [&_ul]:list-disc [&_ul]:pl-5">{children}</div>
       <div className="mt-12 border-t border-line pt-6 text-sm">
-        <Link href="/contact" className="text-gold hover:underline">
-          Une question sur ces conditions ? Contactez-nous.
+        <Link href={contactHref} className="text-gold hover:underline">
+          {contactText}
         </Link>
       </div>
     </div>
@@ -121,32 +129,6 @@ export function Confidentialite() {
         Aucune publicité ciblée. Les événements d'usage (ouverture du configurateur, étapes
         complétées) sont agrégés et anonymisés pour améliorer l'expérience.
       </p>
-    </LegalShell>
-  );
-}
-
-export function Livraison() {
-  return (
-    <LegalShell title="Livraison" updated="janvier 2025">
-      <h2>Livraison</h2>
-      <p>
-        Livraison rapide et gratuite. Chaque création est préparée avec soin dans son coffret —
-        carte, certificat d'authenticité et carton d'accompagnement — et expédiée avec numéro de
-        suivi. Des points de retrait (Chronopost) peuvent être proposés à l'expédition.
-      </p>
-      <h2>Délais</h2>
-      <p>
-        Petite délai supplémentaire possible à cause de la personnalisation : chaque carte est
-        réalisée à la main à partir de votre moment précis, puis vérifiée avant expédition.
-        Formats A1 et A0 : transport rigide surdimensionné.
-      </p>
-      <h2>Emballage</h2>
-      <p>
-        Colis rigide adapté au format, calage soigné. Le coffret cadeau (carte, certificat d'authenticité
-        A4, carton d'accompagnement A6 avec votre message) est inclus.
-      </p>
-      <h2>Colis endommagé</h2>
-      <p>Signalez tout dommage sous 48 h avec photos : refabrication prioritaire, sans frais.</p>
     </LegalShell>
   );
 }

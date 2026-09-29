@@ -9,6 +9,7 @@ import { useState } from "react";
 const NAV = [
   { href: "/admin/dashboard", label: "Tableau de bord", icon: "▦" },
   { href: "/admin/pages", label: "Pages", icon: "◧" },
+  { href: "/admin/editeur", label: "Éditeur du site", icon: "⌘" },
   { href: "/admin/products", label: "Produits", icon: "◆" },
   { href: "/admin/orders", label: "Commandes", icon: "≡" },
   { href: "/admin/commerce", label: "Commerce", icon: "⬡" },

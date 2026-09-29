@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { BoutiqueCmsLayout } from "@/components/page/boutique-cms-layout";
 import { getProducts } from "@/lib/catalog";
+import { getPublishedBoutique } from "@/lib/boutique-cms";
 import { eur } from "@/lib/pricing";
 
 export const dynamic = "force-dynamic";
@@ -12,8 +14,11 @@ export const metadata: Metadata = {
 };
 
 export default async function BoutiquePage() {
-  const all = await getProducts();
+  const [all, editorialPage] = await Promise.all([getProducts(), getPublishedBoutique()]);
   const PRODUCTS = all.filter((p) => p.status === "active");
+
+  if (editorialPage) return <BoutiqueCmsLayout page={editorialPage} products={PRODUCTS} />;
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6">
       <div className="mx-auto max-w-2xl text-center">

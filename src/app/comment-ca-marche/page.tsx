@@ -1,5 +1,9 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { CommentCaMarcheCmsLayout } from "@/components/page/comment-ca-marche-cms-layout";
+import { getPublishedCommentCaMarche } from "@/lib/comment-ca-marche-cms";
+
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Comment ça marche",
@@ -7,7 +11,7 @@ export const metadata: Metadata = {
     "De votre moment à votre œuvre : géocodage, données astronomiques réelles, moteur de calcul du ciel, rendu Fine Art 300 DPI et fabrication en France.",
 };
 
-export default function CommentCaMarche() {
+function CommentCaMarcheFallback() {
   return (
     <div className="mx-auto max-w-4xl px-4 py-14 sm:px-6">
       <p className="text-center text-[11px] tracking-[0.3em] text-gold uppercase">Comment ça marche</p>
@@ -71,4 +75,9 @@ export default function CommentCaMarche() {
       </div>
     </div>
   );
+}
+
+export default async function CommentCaMarchePage() {
+  const cmsPage = await getPublishedCommentCaMarche();
+  return cmsPage ? <CommentCaMarcheCmsLayout page={cmsPage} /> : <CommentCaMarcheFallback />;
 }

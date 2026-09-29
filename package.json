@@ -3,10 +3,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "site-map:generate": "node scripts/generate-site-map.mjs",
+    "prebuild": "npm run site-map:generate",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:cms-structure": "node --experimental-strip-types --test tests/cms-*.test.mjs"
   },
   "dependencies": {
     "dotenv": "17.3.1",

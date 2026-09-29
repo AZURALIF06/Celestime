@@ -93,7 +93,7 @@ export default function PagesClient() {
               {pages.map((p) => (
                 <tr key={p.id} className="border-b border-line/50 last:border-0 hover:bg-raised/40">
                   <td className="px-4 py-3 text-ink">{p.name}</td>
-                  <td className="px-4 py-3 font-mono text-xs text-muted">/p/{p.slug}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-muted">{p.slug === "accueil" ? "/" : `/p/${p.slug}`}</td>
                   <td className="px-4 py-3">
                     <span className={`rounded-full px-2.5 py-1 text-[11px] uppercase tracking-wide ${p.status === "published" ? "bg-gold/15 text-gold" : "bg-raised text-faint"}`}>
                       {p.status === "published" ? "Publiée" : p.status === "archived" ? "Archivée" : "Brouillon"}
