@@ -272,6 +272,30 @@ export const stripeTransactions = pgTable("stripe_transactions", {
   refundedAt: timestamp("refunded_at", { withTimezone: true }),
 });
 
+/**
+ * Phase 3C — soumissions des formulaires CMS.
+ * Les valeurs sont stockées telles que normalisées par `validateCmsFormSubmission`
+ * (texte brut, aucun HTML). Aucune adresse de destinataire ni secret n'est
+ * stocké : la configuration de traitement reste côté serveur.
+ */
+export const cmsFormSubmissions = pgTable("cms_form_submissions", {
+  id: serial("id").primaryKey(),
+  pageSlug: text("page_slug").notNull(),
+  elementId: text("element_id").notNull(),
+  formName: text("form_name").notNull().default(""),
+  name: text("name").notNull().default(""),
+  email: text("email").notNull().default(""),
+  phone: text("phone").notNull().default(""),
+  subject: text("subject").notNull().default(""),
+  message: text("message").notNull().default(""),
+  // Adresse IP hachée au format hexadécimal : sert à la limitation de débit et
+  // n'est jamais réinjectée dans une page.
+  ipHash: text("ip_hash").notNull().default(""),
+  userAgent: text("user_agent").notNull().default(""),
+  status: text("status").notNull().default("received"), // received | notified
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const auditLog = pgTable("audit_log", {
   id: serial("id").primaryKey(),
   actor: text("actor").notNull().default("system"),

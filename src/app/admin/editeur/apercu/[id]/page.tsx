@@ -66,10 +66,10 @@ export default async function AdminDraftPreview({ params }: { params: Promise<{ 
           )
         ) : row.slug === "accueil" || row.slug === "faq" ? (
           <div className="overflow-hidden rounded-xl border border-line">
-            <PageCanvas page={draft} products={[]} />
+            <PageCanvas page={draft} products={[]} slug={row.slug} />
           </div>
         ) : validGenericDraft ? (
-          <CmsResponsivePreview page={draft} />
+          <CmsResponsivePreview page={draft} slug={row.slug} />
         ) : (
           <p role="alert" className="rounded-xl border border-danger/30 bg-danger/5 p-4 text-sm text-danger">Brouillon générique invalide : il n’est pas rendu dans l’aperçu.</p>
         )}

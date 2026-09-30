@@ -9,12 +9,13 @@ import { cmsColumnRenderStyle, cmsContainerRenderStyle, cmsFlowLeafRenderStyle, 
 import type { DbProduct } from "@/lib/catalog";
 import { ElementView } from "@/components/page/element-view";
 import { getCmsBreakpointForWidth, getCmsElementForBreakpoint, resolveCmsElementForBreakpoint, type CmsBreakpoint } from "@/lib/cms-responsive";
+import { resolveCmsSectionHeight } from "@/lib/cms-responsive-rows";
 
 export function effectiveEl(el: CmsElement, bp: CmsBreakpoint) {
   return resolveCmsElementForBreakpoint(el, bp);
 }
 
-function Section({ section, bp, products, genericSafety }: { section: CmsSection; bp: CmsBreakpoint; products: DbProduct[]; genericSafety: boolean }) {
+function Section({ section, bp, products, genericSafety, slug }: { section: CmsSection; bp: CmsBreakpoint; products: DbProduct[]; genericSafety: boolean; slug: string }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   useEffect(() => {
@@ -25,16 +26,19 @@ function Section({ section, bp, products, genericSafety }: { section: CmsSection
     return () => ro.disconnect();
   }, []);
   const els = [...section.elements].sort((a, b) => a.z - b.z);
+  // Phase 3C : la section s'agrandit si l'empilement mobile déborde de sa
+  // hauteur d'origine. Elle n'est jamais rétrécie.
+  const sectionHeight = resolveCmsSectionHeight(section, bp);
   const renderLeaf = (element: CmsElement, flow = false, localResponsive = false) => {
     const rendered = localResponsive ? getCmsElementForBreakpoint(element, bp) : element;
     if (localResponsive && resolveCmsElementForBreakpoint(element, bp).hidden) return null;
     return <div key={element.id} style={flow ? cmsFlowLeafRenderStyle(rendered) : cmsLeafRenderStyle(rendered)}>
-      <ElementView el={rendered} products={products} genericSafety={genericSafety} />
+      <ElementView el={rendered} products={products} genericSafety={genericSafety} formSlug={slug} />
     </div>;
   };
   return (
-    <div ref={wrapRef} className="w-full overflow-hidden" style={{ background: section.bg, height: section.h * scale }}>
-      <div style={{ width: PAGE_WIDTH, height: section.h, transform: `scale(${scale})`, transformOrigin: "top left" }} className="relative">
+    <div ref={wrapRef} className="w-full overflow-hidden" style={{ background: section.bg, height: sectionHeight * scale }}>
+      <div style={{ width: PAGE_WIDTH, height: sectionHeight, transform: `scale(${scale})`, transformOrigin: "top left" }} className="relative">
         {els.map((node) => {
           if (isCmsContainer(node)) {
             return <div key={node.id} data-cms-node="container" style={cmsContainerRenderStyle(node)}>
@@ -47,9 +51,9 @@ function Section({ section, bp, products, genericSafety }: { section: CmsSection
             </div>;
           }
           if (isCmsRow(node)) {
-            return <div key={node.id} data-cms-node="row" style={cmsRowRenderStyle(node)}>
+            return <div key={node.id} data-cms-node="row" style={cmsRowRenderStyle(node, bp)}>
               {node.children.map((column) => isCmsColumn(column) ? (
-                <div key={column.id} data-cms-node="column" style={cmsColumnRenderStyle(column, node)}>
+                <div key={column.id} data-cms-node="column" style={cmsColumnRenderStyle(column, node, bp)}>
                   {column.children.map((child) => renderLeaf(child, true))}
                 </div>
               ) : null)}
@@ -63,7 +67,7 @@ function Section({ section, bp, products, genericSafety }: { section: CmsSection
               position: "absolute", left: eff.x, top: eff.y, width: eff.w, height: eff.h,
               zIndex: node.z, transform: node.rotation ? `rotate(${node.rotation}deg)` : undefined, opacity: node.opacity,
             }}>
-              <ElementView el={renderedElement} products={products} genericSafety={genericSafety} />
+              <ElementView el={renderedElement} products={products} genericSafety={genericSafety} formSlug={slug} />
             </div>
           );
         })}
@@ -72,7 +76,7 @@ function Section({ section, bp, products, genericSafety }: { section: CmsSection
   );
 }
 
-export function PageCanvas({ page, products, bp = "desktop", genericSafety = false }: { page: CmsPage; products: DbProduct[]; bp?: CmsBreakpoint | "auto"; genericSafety?: boolean }) {
+export function PageCanvas({ page, products, bp = "desktop", genericSafety = false, slug = "" }: { page: CmsPage; products: DbProduct[]; bp?: CmsBreakpoint | "auto"; genericSafety?: boolean; slug?: string }) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const [detectedBreakpoint, setDetectedBreakpoint] = useState<CmsBreakpoint>("desktop");
   useEffect(() => {
@@ -92,7 +96,7 @@ export function PageCanvas({ page, products, bp = "desktop", genericSafety = fal
   return (
     <div ref={canvasRef} data-cms-breakpoint={activeBreakpoint}>
       {page.sections.map((section) => (
-        <Section key={section.id} section={section} bp={activeBreakpoint} products={products} genericSafety={genericSafety} />
+        <Section key={section.id} section={section} bp={activeBreakpoint} products={products} genericSafety={genericSafety} slug={slug} />
       ))}
     </div>
   );

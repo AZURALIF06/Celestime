@@ -3,6 +3,7 @@
 // avec des overrides responsive (desktop / tablette / mobile).
 
 import type { Metadata } from "next";
+import { isValidCmsFormContent } from "./cms-form.ts";
 
 export interface CmsElement {
   id: string;
@@ -44,6 +45,18 @@ export interface CmsContainer {
 export type CmsRowJustify = "start" | "center" | "end" | "between";
 export type CmsRowAlign = "start" | "center" | "end";
 
+/** Phase 3C : réglages de rangée par appareil. Absent = comportement Phase 3B. */
+export interface CmsRowResponsive {
+  tablet?: { gap?: number; stack?: boolean };
+  mobile?: { gap?: number; stack?: boolean };
+}
+
+/** Phase 3C : réglages de colonne par appareil. Absent = comportement Phase 3B. */
+export interface CmsColumnResponsive {
+  tablet?: { width?: number; hidden?: boolean };
+  mobile?: { width?: number; hidden?: boolean; order?: number };
+}
+
 /** A horizontal flow row; child widths are percentages of the post-gap content width. */
 export interface CmsRow {
   id: string;
@@ -61,6 +74,7 @@ export interface CmsRow {
   gap: number;
   alignX: CmsRowJustify;
   alignY: CmsRowAlign;
+  responsive?: CmsRowResponsive;
   children: CmsColumn[];
 }
 
@@ -75,6 +89,7 @@ export interface CmsColumn {
   hidden?: boolean;
   layout: "vertical";
   gap: number;
+  responsive?: CmsColumnResponsive;
   children: CmsElement[];
 }
 
@@ -492,6 +507,36 @@ export function isValidCmsLink(value: unknown): value is string {
   return true;
 }
 
+/**
+ * Phase 3C — destinations de bouton. Trois familles explicites, rien d'autre :
+ * lien interne/externe HTTPS, `tel:`, `mailto:`. `javascript:`, `data:`,
+ * `vbscript:` et les URL protocol-relative sont refusés en amont.
+ */
+export function resolveCmsButtonHref(value: unknown): { href: string; kind: "internal" | "external" | "phone" | "email" } | null {
+  if (typeof value !== "string") return null;
+  const raw = value.trim();
+  if (!raw || raw.length > 2048 || /[\u0000-\u001f\u007f]/.test(raw)) return null;
+  if (raw.includes("\\") || raw.startsWith("//")) return null;
+
+  const protocol = raw.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase();
+  if (protocol === "tel") {
+    const number = raw.slice(4).replace(/[\s().-]/g, "");
+    if (!/^\+?[0-9]{6,20}$/.test(number)) return null;
+    return { href: `tel:${number}`, kind: "phone" };
+  }
+  if (protocol === "mailto") {
+    const address = raw.slice(7).split("?")[0].trim();
+    if (!address || address.length > 254 || !/^[^\s@<>]+@[^\s@<>]+\.[a-zA-Z]{2,}$/.test(address)) return null;
+    return { href: `mailto:${address.toLowerCase()}`, kind: "email" };
+  }
+  // Seul https passe le validateur de lien général ; javascript:, data:,
+  // vbscript:, file: et tout autre schéma sont refusés ici.
+  if (protocol && protocol !== "https") return null;
+  if (!isValidCmsLink(raw)) return null;
+  const absolute = raw.startsWith("https://");
+  return { href: raw, kind: absolute ? "external" : "internal" };
+}
+
 /** Normalize accepted YouTube URLs to a narrow, safe iframe embed URL. */
 export function getCmsVideoEmbedUrl(value: unknown): string | null {
   if (typeof value !== "string" || value !== value.trim() || !value || value.length > 2048) return null;
@@ -540,8 +585,8 @@ export const MAX_CMS_TOTAL_NODES = 1000;
 export const MAX_CMS_STRUCTURE_DEPTH = 4;
 const MAX_CMS_COORDINATE = 100_000;
 const CMS_FREE_KEYS = ["id", "nodeType", "x", "y", "w", "h", "z", "rotation", "opacity", "locked", "hidden", "layout", "children"] as const;
-const CMS_ROW_KEYS = ["id", "nodeType", "x", "y", "w", "h", "z", "rotation", "opacity", "locked", "hidden", "layout", "gap", "alignX", "alignY", "children"] as const;
-const CMS_COLUMN_KEYS = ["id", "nodeType", "width", "z", "opacity", "locked", "hidden", "layout", "gap", "children"] as const;
+const CMS_ROW_KEYS = ["id", "nodeType", "x", "y", "w", "h", "z", "rotation", "opacity", "locked", "hidden", "layout", "gap", "alignX", "alignY", "children", "responsive"] as const;
+const CMS_COLUMN_KEYS = ["id", "nodeType", "width", "z", "opacity", "locked", "hidden", "layout", "gap", "children", "responsive"] as const;
 const CMS_ELEMENT_KEYS = [
   "id", "type", "x", "y", "w", "h", "z", "rotation", "opacity",
   "locked", "hidden", "content", "style", "link", "responsive",
@@ -566,6 +611,35 @@ function isSafeStyle(value: unknown): value is Record<string, any> {
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+/** Phase 3C : overrides de rangée bornés, clés inconnues refusées. */
+function validCmsRowResponsive(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value) || !hasOnlyKeys(value, ["tablet", "mobile"])) return false;
+  for (const key of ["tablet", "mobile"] as const) {
+    const override = value[key];
+    if (override === undefined) continue;
+    if (!isRecord(override) || !hasOnlyKeys(override, ["gap", "stack"])) return false;
+    if (override.gap !== undefined && !finiteNumber(override.gap, 0, 128)) return false;
+    if (override.stack !== undefined && typeof override.stack !== "boolean") return false;
+  }
+  return true;
+}
+
+/** Phase 3C : overrides de colonne bornés, clés inconnues refusées. */
+function validCmsColumnResponsive(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value) || !hasOnlyKeys(value, ["tablet", "mobile"])) return false;
+  for (const key of ["tablet", "mobile"] as const) {
+    const override = value[key];
+    if (override === undefined) continue;
+    if (!isRecord(override) || !hasOnlyKeys(override, ["width", "hidden", "order"])) return false;
+    if (override.width !== undefined && !finiteNumber(override.width, 1, 100)) return false;
+    if (override.hidden !== undefined && typeof override.hidden !== "boolean") return false;
+    if (override.order !== undefined && (!finiteNumber(override.order, -MAX_CMS_COLUMNS_PER_ROW, MAX_CMS_COLUMNS_PER_ROW) || !Number.isInteger(override.order))) return false;
+  }
+  return true;
 }
 
 function validVisualFrame(content: Record<string, unknown>): boolean {
@@ -665,7 +739,7 @@ function validateGenericCmsPage(value: unknown, options: GenericCmsValidationOpt
         if (rawNode.nodeType === "row") {
           rows += 1;
           if (rows > MAX_CMS_ROWS_PER_SECTION || !hasOnlyKeys(rawNode, CMS_ROW_KEYS) || !validFlagsAndFrame(rawNode) ||
-            rawNode.layout !== "horizontal" || !finiteNumber(rawNode.gap, 0, 128) ||
+            rawNode.layout !== "horizontal" || !validCmsRowResponsive(rawNode.responsive) || !finiteNumber(rawNode.gap, 0, 128) ||
             !["start", "center", "end", "between"].includes(String(rawNode.alignX)) ||
             !["start", "center", "end"].includes(String(rawNode.alignY)) || !Array.isArray(rawNode.children) ||
             rawNode.children.length < 1 || rawNode.children.length > MAX_CMS_COLUMNS_PER_ROW) return false;
@@ -676,6 +750,7 @@ function validateGenericCmsPage(value: unknown, options: GenericCmsValidationOpt
             if (totalNodes > MAX_CMS_TOTAL_NODES || !finiteNumber(rawColumn.width, 1, 100) || !finiteNumber(rawColumn.z) ||
               !finiteNumber(rawColumn.opacity, 0, 1) || (rawColumn.locked !== undefined && typeof rawColumn.locked !== "boolean") ||
               (rawColumn.hidden !== undefined && typeof rawColumn.hidden !== "boolean") || rawColumn.layout !== "vertical" ||
+              !validCmsColumnResponsive(rawColumn.responsive) ||
               !finiteNumber(rawColumn.gap, 0, 128) || !Array.isArray(rawColumn.children) || rawColumn.children.length > MAX_CMS_COLUMN_CHILDREN) return false;
             widthTotal += rawColumn.width;
             for (const rawChild of rawColumn.children) if (!addLeaf(rawChild, leaves)) return false;
@@ -797,7 +872,10 @@ function validateGenericCmsPage(value: unknown, options: GenericCmsValidationOpt
           if (content.color !== undefined && !boundedString(content.color, 100, false)) return false;
           break;
         case "button":
-          if (!boundedString(content.text, 1000) || typeof content.href !== "string" || (!forRendering && !isValidCmsLink(content.href))) return false;
+          if (!hasOnlyKeys(content, ["text", "href", "newTab", "align"]) || !boundedString(content.text, 1000)) return false;
+          if (typeof content.href !== "string" || (!forRendering && !resolveCmsButtonHref(content.href))) return false;
+          if (content.newTab !== undefined && typeof content.newTab !== "boolean") return false;
+          if (content.align !== undefined && !["left", "center", "right"].includes(String(content.align))) return false;
           break;
         case "hero":
           if (!hasOnlyKeys(content, ["eyebrow", "title", "subtitle", "imageSrc", "imageAlt", "buttonLabel", "buttonHref"]) ||
@@ -831,8 +909,11 @@ function validateGenericCmsPage(value: unknown, options: GenericCmsValidationOpt
           if (content.label !== undefined && !boundedString(content.label, 1000)) return false;
           break;
         case "newsletter":
-        case "form":
           if (content.text !== undefined && !boundedString(content.text, 4000)) return false;
+          break;
+        case "form":
+          // Phase 3C : modèle de formulaire complet, validé par le module dédié.
+          if (!isValidCmsFormContent(content)) return false;
           break;
         case "testimonials":
           if (content.title !== undefined && !boundedString(content.title, 1000)) return false;
@@ -1057,7 +1138,25 @@ export const LIBRARY: LibraryItem[] = [
   t("text", "Bannière titre", "Marketing", { content: { text: "Une parcelle de ciel, avec un message de votre choix", variant: "h2" }, style: { fontFamily: "serif", size: 42, weight: 600, color: "#ece9e2", align: "center" }, w: 900, h: 110 }),
   t("countdown", "Compte à rebours", "Marketing", { content: { date: "2026-02-14T00:00:00", label: "Saint-Valentin — -20 % jusqu'à" }, style: { size: 28, color: "#ece9e2" }, w: 560, h: 140 }),
   t("newsletter", "Newsletter", "Marketing", { content: { text: "La lettre céleste, une fois par mois." }, style: { bg: "#0c0e16", radius: 20 }, w: 520, h: 140 }),
-  t("form", "Formulaire de contact", "Marketing", { content: { text: "Écrivez-nous" }, style: { bg: "#0c0e16", radius: 20 }, w: 480, h: 340 }),
+  t("form", "Formulaire de contact", "Marketing", {
+    content: {
+      // `text` est conservé (Phase 3B) et sert de repli du titre.
+      text: "Écrivez-nous",
+      title: "Écrivez-nous",
+      description: "",
+      fields: [
+        { key: "name", type: "name", label: "Votre nom", enabled: true, required: true, placeholder: "Camille Dupont", rows: 1 },
+        { key: "email", type: "email", label: "Votre e-mail", enabled: true, required: true, placeholder: "camille@exemple.fr", rows: 1 },
+        { key: "phone", type: "phone", label: "Téléphone", enabled: false, required: false, placeholder: "06 00 00 00 00", rows: 1 },
+        { key: "subject", type: "subject", label: "Sujet", enabled: false, required: false, placeholder: "Votre demande", rows: 1 },
+        { key: "message", type: "message", label: "Votre message", enabled: true, required: true, placeholder: "Racontez-nous votre moment…", rows: 5 },
+      ],
+      submitLabel: "Envoyer",
+      successMessage: "Merci ! Votre message a bien été envoyé.",
+      errorMessage: "Votre message n’a pas pu être envoyé. Merci de réessayer.",
+    },
+    style: { bg: "#0c0e16", radius: 20 }, w: 560, h: 520,
+  }, "Formulaire réellement traité côté serveur : validation, envoi et confirmation authentiques."),
   t("testimonials", "Témoignages", "Marketing", { content: { title: "Ils ont trouvé leur ciel" }, w: 1120, h: 220, x: 40 }),
   t("faq", "FAQ", "Marketing", { content: { title: "Questions fréquentes" }, w: 760, h: 320, x: 40 }),
 ];

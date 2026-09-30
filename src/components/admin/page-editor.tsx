@@ -31,6 +31,7 @@ import {
   isCmsNodeEditable,
   isValidGenericCmsPage,
   makeElement,
+  resolveCmsButtonHref,
   updateCmsNodeInSection,
   type CmsColumn,
   type CmsContainer,
@@ -44,6 +45,17 @@ import {
   type CmsStructuralNode,
   type LibraryItem,
 } from "@/lib/cms";
+import {
+  cmsAddTargetNodeId,
+  describeCmsTarget,
+  moveCmsLeafToColumn,
+  removeCmsLeaf,
+  resolveCmsAddTarget,
+  resolveCmsColumnDropTarget,
+  type CmsAddTarget,
+} from "@/lib/cms-columns";
+import { describeCmsRowLayout, resolveCmsColumnInsertionY, type CmsRowBreakpoint } from "@/lib/cms-responsive-rows";
+import { CMS_FORM_FIELD_KEYS, normalizeCmsFormConfig, type CmsFormConfig, type CmsFormFieldKey } from "@/lib/cms-form";
 import MediaPicker from "@/components/admin/media-picker";
 import { alignFrame, appendHistorySnapshot, canvasFitZoom, clampFrame, resizeFrame, screenDeltaToCanvas, snapFrame, type CanvasGuide } from "@/lib/cms-editor-canvas";
 import { CMS_STRUCTURE_LIMITS, cmsColumnRenderStyle, cmsContainerRenderStyle, cmsFlowLeafRenderStyle, cmsGroupRenderStyle, cmsLeafRenderStyle, cmsRowRenderStyle } from "@/lib/cms-structure";
@@ -142,6 +154,12 @@ export default function PageEditor({
   const [guides, setGuides] = useState<CanvasGuide[]>([]);
   const [guideSectionId, setGuideSectionId] = useState<string | null>(null);
   const [spacePressed, setSpacePressed] = useState(false);
+  const [dropTarget, setDropTarget] = useState<{ sectionId: string; columnId: string; index: number } | null>(null);
+  // Ref miroir : l'ecOUTIL mouseup est enregistre hors du cycle de rendu, il ne
+  // doit pas lire un etat capture par closure (trop ancien).
+  const dropTargetRef = useRef<{ sectionId: string; columnId: string; index: number } | null>(null);
+  const sectionRefs = useRef(new Map<string, HTMLDivElement>());
+  const columnDragRef = useRef<{ sectionId: string; leafId: string; originalPage: CmsPage; moved: boolean } | null>(null);
   const [clipboard, setClipboard] = useState<CmsElement[] | null>(null);
   const [versions, setVersions] = useState<{ id: number; label: string; createdAt: string }[]>([]);
   const [showVersions, setShowVersions] = useState(false);
@@ -457,45 +475,61 @@ export default function PageEditor({
     setSel(null);
   };
 
-  const addElement = (itemOrType: LibraryItem | string, sectionId?: string, x?: number, y?: number) => {
-    const item = typeof itemOrType === "string" ? LIBRARY.find((entry) => entry.type === itemOrType) : itemOrType;
-    if (!item || (initialSlug === "boutique" && (item.type === "product" || item.type === "productGrid"))) return;
-    const targetSectionId = sectionId ?? selSection?.id ?? page.sections[page.sections.length - 1]?.id;
-    if (!targetSectionId) return;
-    const selectedColumn = selColumn && sel?.sectionId === targetSectionId ? selColumn : null;
-    const selectedContainer = selContainer && sel?.sectionId === targetSectionId ? selContainer : null;
-    const targetParent = selectedColumn ?? selectedContainer;
-    const targetSection = pageRef.current.sections.find((section) => section.id === targetSectionId);
-    if (!targetSection || (!targetParent && targetSection.elements.length >= CMS_STRUCTURE_LIMITS.elementsPerSection)) { show("La limite de feuilles de cette section est atteinte."); return; }
-    if (targetParent && !isCmsNodeEditable(pageRef.current.sections.find((section) => section.id === targetSectionId)!, targetParent.id)) { show("Déverrouillez les parents avant d’ajouter un élément."); return; }
-    if (targetParent && targetParent.children.length >= (selectedColumn ? CMS_STRUCTURE_LIMITS.childrenPerColumn : CMS_STRUCTURE_LIMITS.childrenPerContainer)) { show("La limite d’enfants de cette structure est atteinte."); return; }
-    if (targetParent && countCmsNodes(pageRef.current) >= CMS_STRUCTURE_LIMITS.totalNodesPerPage) { show("La limite totale de nœuds est atteinte."); return; }
-    if (targetParent && device !== "desktop") { show("Le contenu structurel s’édite sur Desktop uniquement."); return; }
-    const el = makeElement(item,
-      selectedColumn ? 0 : x ?? (selectedContainer ? 24 : undefined),
-      selectedColumn ? 0 : y ?? (selectedContainer ? 24 : undefined),
-      targetParent ? targetParent.children.length + 1 : (selSection?.elements.length ?? 0) + 1);
+  /**
+   * Phase 3C — la cible d'ajout est dérivée de l'ARBRE, pas d'une variable de
+   * sélection globale : sélectionner une feuille située dans une colonne cible
+   * désormais CETTE colonne (Phase 3B ajoutait à la racine de section).
+   */
+  const resolveAddTargetFor = (sectionId: string): CmsAddTarget => {
+    const section = pageRef.current.sections.find((candidate) => candidate.id === sectionId);
+    if (!section) return { kind: "section" };
+    return resolveCmsAddTarget(section, sel?.sectionId === sectionId ? sel.elId : null);
+  };
+
+  const addElementToTarget = (item: LibraryItem, sectionId: string, target: CmsAddTarget) => {
+    const section = pageRef.current.sections.find((candidate) => candidate.id === sectionId);
+    if (!section) return;
+    const targetId = cmsAddTargetNodeId(target);
+    if (!targetId && section.elements.length >= CMS_STRUCTURE_LIMITS.elementsPerSection) {
+      show("La limite de feuilles de cette section est atteinte."); return;
+    }
+    if (targetId && !isCmsNodeEditable(section, targetId)) {
+      show("Déverrouillez les parents avant d’ajouter un élément."); return;
+    }
+    if (targetId && countCmsNodes(pageRef.current) >= CMS_STRUCTURE_LIMITS.totalNodesPerPage) {
+      show("La limite totale de nœuds est atteinte."); return;
+    }
+    if (targetId && device !== "desktop") {
+      show("Le contenu structurel s’édite sur Desktop uniquement."); return;
+    }
+    const el = makeElement(item, 0, 0, 1);
     el.id = createCmsIdFactory(pageRef.current)();
     if (!isValidGenericCmsPage({ sections: [{ id: "structure-child-check", h: 1, elements: [el] }] })) {
       show("Ce bloc n’est pas autorisé comme feuille de page générique.");
       return;
     }
-    if (selectedColumn) {
-      const currentSection = pageRef.current.sections.find((section) => section.id === targetSectionId)!;
-      const row = findCmsParentNode(currentSection, selectedColumn.id);
-      if (!row || !isCmsRow(row)) return;
-      update((p) => ({ sections: p.sections.map((section) => updateCmsNodeInSection(section, row.id, (node) => isCmsRow(node) ? {
-        ...node, children: node.children.map((column) => column.id === selectedColumn.id ? { ...column, children: [...column.children, el] } : column),
-      } : node)) }));
-      setSel({ sectionId: targetSectionId, elId: el.id, parentId: selectedColumn.id });
-    } else if (selectedContainer) {
-      update((p) => ({ sections: p.sections.map((section) => updateCmsNodeInSection(section, selectedContainer.id, (node) => isCmsContainer(node) ? { ...node, children: [...node.children, el] } : node)) }));
-      setSel({ sectionId: targetSectionId, elId: el.id, parentId: selectedContainer.id });
+    if (!targetId) {
+      update((p) => ({ sections: p.sections.map((candidate) => candidate.id === sectionId
+        ? { ...candidate, elements: [...candidate.elements, { ...el, x: 60, y: 40 }] }
+        : candidate) }));
+      setSel({ sectionId, elId: el.id });
     } else {
-      update((p) => ({ sections: p.sections.map((section) => section.id === targetSectionId ? { ...section, elements: [...section.elements, el] } : section) }));
-      setSel({ sectionId: targetSectionId, elId: el.id });
+      update((p) => ({ sections: p.sections.map((candidate) => updateCmsNodeInSection(candidate, targetId, (node) => {
+        if (!isCmsStructuralNode(node)) return node;
+        return { ...node, children: [...node.children, el] } as CmsStructuralNode;
+      })) }));
+      setSel({ sectionId, elId: el.id, parentId: targetId });
     }
     setMultiSel([]);
+    show(`Ajouté dans ${describeCmsTarget(section, target)}.`);
+  };
+
+  const addElement = (itemOrType: LibraryItem | string, sectionId?: string) => {
+    const item = typeof itemOrType === "string" ? LIBRARY.find((entry) => entry.type === itemOrType) : itemOrType;
+    if (!item || (initialSlug === "boutique" && (item.type === "product" || item.type === "productGrid"))) return;
+    const targetSectionId = sectionId ?? selSection?.id ?? page.sections[page.sections.length - 1]?.id;
+    if (!targetSectionId) return;
+    addElementToTarget(item, targetSectionId, resolveAddTargetFor(targetSectionId));
   };
 
   const setEl = (sectionId: string, elId: string, patch: Partial<CmsElement>) => {
@@ -539,6 +573,30 @@ export default function PageEditor({
     update((p) => ({ sections: p.sections.map((item) => item.id === sectionId ? updateCmsNodeInSection(item, rowId, (node) => isCmsRow(node) ? {
       ...node, children: node.children.map((column) => column.id === columnId ? { ...column, width: value } : { ...column, width: widths.get(column.id) ?? column.width }),
     } : node) : item) }));
+  };
+
+  /** Phase 3C — ecrit une cle responsive de rangee ou de colonne sans ecraser les autres. */
+  const setStructureResponsive = (
+    sectionId: string,
+    nodeId: string,
+    breakpoint: CmsRowBreakpoint,
+    patch: Record<string, unknown> | null,
+  ) => {
+    setStructure(sectionId, nodeId, (() => {
+      const section = pageRef.current.sections.find((candidate) => candidate.id === sectionId);
+      const node = section && findCmsNode(section, nodeId);
+      if (!node || !isCmsStructuralNode(node)) return {};
+      const current = ((node as CmsRow | CmsColumn).responsive ?? {}) as Record<string, Record<string, unknown>>;
+      const nextBreakpoint = { ...(current[breakpoint] ?? {}) };
+      for (const [key, value] of Object.entries(patch ?? {})) {
+        if (value === null) delete nextBreakpoint[key];
+        else nextBreakpoint[key] = value;
+      }
+      const next = { ...current };
+      if (Object.keys(nextBreakpoint).length) next[breakpoint] = nextBreakpoint;
+      else delete next[breakpoint];
+      return { responsive: Object.keys(next).length ? next : undefined } as Partial<CmsRow> & Partial<CmsColumn>;
+    })());
   };
 
   const reorderColumnChild = (sectionId: string, rowId: string, columnId: string, childId: string, direction: -1 | 1) => {
@@ -656,6 +714,25 @@ export default function PageEditor({
         stageRef.current.scrollTop = panRef.current.scrollTop - (event.clientY - panRef.current.startY);
         return;
       }
+      const columnDrag = columnDragRef.current;
+      if (columnDrag) {
+        columnDrag.moved = true;
+        const host = sectionRefs.current.get(columnDrag.sectionId);
+        if (!host) return;
+        const section = pageRef.current.sections.find((candidate) => candidate.id === columnDrag.sectionId);
+        if (!section) return;
+        const rect = host.getBoundingClientRect();
+        const scale = scaleRef.current || 1;
+        const point = {
+          x: (event.clientX - rect.left) / scale,
+          y: (event.clientY - rect.top) / scale,
+        };
+        const target = resolveCmsColumnDropTarget(section, point);
+        const next = target ? { sectionId: columnDrag.sectionId, columnId: target.columnId, index: target.index } : null;
+        dropTargetRef.current = next;
+        setDropTarget(next);
+        return;
+      }
       const drag = dragRef.current;
       if (!drag) return;
       const screenDx = event.clientX - drag.start.x;
@@ -739,6 +816,27 @@ export default function PageEditor({
         return;
       }
       if (panRef.current) { panRef.current = null; return; }
+      const columnDrag = columnDragRef.current;
+      if (columnDrag) {
+        columnDragRef.current = null;
+        const target = dropTargetRef.current;
+        dropTargetRef.current = null;
+        setDropTarget(null);
+        if (!columnDrag.moved || !target || target.sectionId !== columnDrag.sectionId) return;
+        const result = moveCmsLeafToColumn(pageRef.current, columnDrag.sectionId, {
+          leafId: columnDrag.leafId,
+          columnId: target.columnId,
+          index: target.index,
+        });
+        if (!result.ok) {
+          if (result.reason === "locked") show("Déverrouillez la destination avant de déplacer cet élément.");
+          else if (result.reason === "column-full") show("La colonne de destination a atteint sa limite d’éléments.");
+          return;
+        }
+        update((p) => ({ sections: p.sections.map((candidate) => candidate.id === columnDrag.sectionId ? result.section : candidate) }));
+        setSel({ sectionId: columnDrag.sectionId, elId: columnDrag.leafId, parentId: target.columnId });
+        return;
+      }
       const drag = dragRef.current;
       if (!drag) return;
       dragRef.current = null;
@@ -772,7 +870,9 @@ export default function PageEditor({
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
     return () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
-  }, [device, pushHistory, snapEnabled]);
+    // `show` et `update` sont des useCallback stables (dependances vides) :
+    // les ajouter ne reabonne pas l'ecouteur a chaque rendu.
+  }, [device, pushHistory, snapEnabled, show, update]);
 
   const startSectionResize = (event: React.MouseEvent, section: CmsSection) => {
     if (spacePressed || event.button !== 0) return;
@@ -788,6 +888,23 @@ export default function PageEditor({
       moved: false,
       originalPage: pageRef.current,
     };
+  };
+
+  /**
+   * Phase 3C — drag & drop structurel des feuilles en flux.
+   * Phase 3B les feuilles de colonne n'etaient selectionnables qu'au clic :
+   * le parent etait fige au mousedown, donc aucun deplacement entre colonnes
+   * n'etait possible. Ici la cible est recalculee a chaque mouvement.
+   */
+  const startColumnDrag = (e: React.MouseEvent, section: CmsSection, element: CmsElement, parentId: string) => {
+    if (spacePressed || e.button !== 0) return;
+    selectNode({ sectionId: section.id, elId: element.id, parentId });
+    setEditingText(null);
+    if (!isCmsNodeEditable(section, element.id)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    scaleRef.current = canvasScale;
+    columnDragRef.current = { sectionId: section.id, leafId: element.id, originalPage: pageRef.current, moved: false };
   };
 
   const startDrag = (e: React.MouseEvent, section: CmsSection, node: CmsNode, mode: "move" | "resize", dir?: string, parentId?: string) => {
@@ -1316,6 +1433,19 @@ export default function PageEditor({
         {/* Bibliothèque */}
         <aside className="w-52 shrink-0 overflow-y-auto border-r border-line bg-surface/60 p-3">
           <p className="mb-2 text-[10px] tracking-[0.2em] text-faint uppercase">Bibliothèque</p>
+          {(() => {
+            const hintSectionId = selSection?.id ?? page.sections[page.sections.length - 1]?.id;
+            const hintSection = hintSectionId ? page.sections.find((candidate) => candidate.id === hintSectionId) : undefined;
+            const hintTarget = hintSection ? resolveCmsAddTarget(hintSection, sel?.sectionId === hintSectionId ? sel.elId : null) : null;
+            return hintTarget ? (
+              <p data-cms-add-target="true" className="mb-2 rounded-lg border border-line bg-surface/60 px-2.5 py-1.5 text-[11px] text-muted">
+                Ajout dans <span className="text-goldsoft">{describeCmsTarget(hintSection!, hintTarget)}</span>
+                {hintTarget.kind === "column" && (
+                  <span className="ml-1 text-faint">— sélectionnez la colonne pour changer de cible</span>
+                )}
+              </p>
+            ) : null;
+          })()}
           {editorLibraryGroups.map(([cat, items]) => (
             <div key={cat} className="mb-3">
               <p className="mb-1.5 text-[10px] tracking-[0.16em] text-gold uppercase">{cat}</p>
@@ -1409,6 +1539,7 @@ export default function PageEditor({
                   <button onClick={() => removeSection(section.id)} className="rounded bg-raised px-1.5 text-[11px] text-danger" title="Supprimer">×</button>
                 </div>
                 <div
+                  ref={(node) => { if (node) sectionRefs.current.set(section.id, node); else sectionRefs.current.delete(section.id); }}
                   className="relative overflow-hidden rounded-lg border border-line"
                   style={{ width: PAGE_WIDTH * canvasScale, height: section.h * canvasScale, background: section.bg, outline: sel?.sectionId === section.id && selIsSection ? "2px solid #c9a86a" : undefined, outlineOffset: 2 }}
                   onDragOver={(event) => event.preventDefault()}
@@ -1418,12 +1549,18 @@ export default function PageEditor({
                     const item = Number.isInteger(itemIndex) ? LIBRARY[itemIndex] : undefined;
                     if (item) {
                       event.preventDefault();
+                      // Phase 3C : la bibliotheque vise la colonne reellement
+                      // selectionnee, ou la colonne survolee au moment du drop.
                       const rect = event.currentTarget.getBoundingClientRect();
-                      let x = Math.round((event.clientX - rect.left) / canvasScale - 60);
-                      let y = Math.round((event.clientY - rect.top) / canvasScale - 30);
-                      const targetContainer = selContainer && sel?.sectionId === section.id ? selContainer : null;
-                      if (targetContainer) { x -= targetContainer.x; y -= targetContainer.y; }
-                      addElement(item, section.id, x, y);
+                      const point = {
+                        x: (event.clientX - rect.left) / canvasScale,
+                        y: (event.clientY - rect.top) / canvasScale,
+                      };
+                      const hovered = resolveCmsColumnDropTarget(section, point);
+                      const target = hovered
+                        ? { kind: "column", columnId: hovered.columnId, rowId: hovered.rowId } as CmsAddTarget
+                        : resolveAddTargetFor(section.id);
+                      addElementToTarget(item, section.id, target);
                     }
                   }}
                 >
@@ -1445,13 +1582,15 @@ export default function PageEditor({
                         const frameStyle = flow ? cmsFlowLeafRenderStyle(effectiveElement) : cmsLeafRenderStyle(effectiveElement);
                         return (
                           <div key={element.id}
-                            onMouseDown={(event) => flow ? (event.stopPropagation(), selectNode({ sectionId: section.id, elId: element.id, parentId }, event, false)) : startDrag(event, section, element, "move", undefined, parentId)}
+                            onMouseDown={(event) => flow
+                              ? startColumnDrag(event, section, element, parentId!)
+                              : startDrag(event, section, element, "move", undefined, parentId)}
                             onDoubleClick={() => !isLocked && element.type === "text" && setEditingText(element.id)}
-                            className={`select-none ${flow ? "relative w-full" : "absolute"} ${isLocked ? "cursor-not-allowed" : flow ? "cursor-default" : "cursor-move"}`}
+                            className={`select-none ${flow ? "relative w-full" : "absolute"} ${isLocked ? "cursor-not-allowed" : flow ? "cursor-grab active:cursor-grabbing" : "cursor-move"}`}
                             style={{ ...frameStyle, outline: isSelected || isMultiSelected ? "2px solid #c9a86a" : isLocked ? "1px dashed #6d6c7d" : "1px solid transparent", outlineOffset: 2 }}>
                             {editingText === element.id ? <ContentEditableText value={(element.content?.text as string) ?? ""}
                               onChange={(value) => setEl(section.id, element.id, { content: { ...element.content, text: value } })}
-                              onDone={() => setEditingText(null)} style={textStyleFor(effectiveElement)} /> : <ElementViewLazy el={effectiveElement} />}
+                              onDone={() => setEditingText(null)} style={textStyleFor(effectiveElement)} /> : <ElementViewLazy el={effectiveElement} formSlug={initialSlug} />}
                             {isSelected && !isLocked && !flow && <>
                               {(["nw", "ne", "sw", "se"] as const).map((direction) => <span key={direction} onMouseDown={(event) => startDrag(event, section, element, "resize", direction, parentId)} className="absolute z-30 h-3 w-3 rounded-full border border-gold bg-night" style={handleStyle(direction)} aria-hidden="true" />)}
                               {(["n", "s", "e", "w"] as const).map((direction) => <span key={direction} onMouseDown={(event) => startDrag(event, section, element, "resize", direction, parentId)} className="absolute z-30 h-3 w-3 rounded-full border border-gold/60 bg-night" style={handleStyle(direction)} aria-hidden="true" />)}
@@ -1470,8 +1609,24 @@ export default function PageEditor({
                             <div key={column.id} data-cms-node="column"
                               onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); selectNode({ sectionId: section.id, elId: column.id, parentId: node.id }, event, false); }}
                               className="relative min-w-0"
-                              style={{ ...cmsColumnRenderStyle(column, node), outline: sel?.elId === column.id ? "2px solid #c9a86a" : column.locked || locked ? "1px dashed #6d6c7d" : "1px dashed rgba(201,168,106,.2)", outlineOffset: -2 }}>
+                              data-cms-column-drop={dropTarget?.sectionId === section.id && dropTarget.columnId === column.id ? "true" : undefined}
+                              style={{
+                                ...cmsColumnRenderStyle(column, node),
+                                outline: sel?.elId === column.id ? "2px solid #c9a86a"
+                                  : dropTarget?.sectionId === section.id && dropTarget.columnId === column.id ? "2px dashed #f0c674"
+                                  : column.locked || locked ? "1px dashed #6d6c7d" : "1px dashed rgba(201,168,106,.2)",
+                                outlineOffset: -2,
+                              }}>
                               {column.children.map((child) => renderLeaf(child, column.id, true))}
+                              {dropTarget?.sectionId === section.id && dropTarget.columnId === column.id && (() => {
+                                const offset = resolveCmsColumnInsertionY(column, dropTarget.index);
+                                return <span
+                                  aria-hidden="true"
+                                  data-cms-drop-indicator="true"
+                                  className="pointer-events-none absolute left-0 right-0 z-40 border-t-2 border-dashed border-gold bg-gold/10"
+                                  style={{ top: offset }}
+                                />;
+                              })()}
                             </div>
                           ))}
                           {selected && !locked && <>
@@ -1589,6 +1744,19 @@ export default function PageEditor({
                 <button type="button" onClick={() => duplicateEl(selSection.id, selRow.id)} disabled={selReadOnly} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted disabled:opacity-40">Dupliquer</button>
                 <button type="button" onClick={() => removeEl(selSection.id, selRow.id)} disabled={selReadOnly} className="rounded border border-danger/40 px-2.5 py-1.5 text-xs text-danger disabled:opacity-40">Supprimer</button>
               </div>
+              <p className="mb-1.5 mt-3 text-[10px] tracking-[0.2em] text-faint uppercase">Responsive</p>
+              <Field label="Empiler sur tablette">
+                <select className={inputCls} value={selRow.responsive?.tablet?.stack === true ? "1" : "0"} onChange={(event) => setStructureResponsive(selSection.id, selRow.id, "tablet", { stack: event.target.value === "1" })}><option value="0">Non</option><option value="1">Oui</option></select>
+              </Field>
+              <Field label="Empiler sur mobile">
+                <select className={inputCls} value={selRow.responsive?.mobile?.stack === true ? "1" : "0"} onChange={(event) => setStructureResponsive(selSection.id, selRow.id, "mobile", { stack: event.target.value === "1" })}><option value="0">Non (horizontale)</option><option value="1">Oui (colonnes empilées)</option></select>
+              </Field>
+              <Field label="Gap tablette (px)"><NumInput v={selRow.responsive?.tablet?.gap ?? selRow.gap} min={0} max={128} onChange={(v) => setStructureResponsive(selSection.id, selRow.id, "tablet", { gap: Math.min(128, Math.max(0, v)) })} /></Field>
+              <Field label="Gap mobile (px)"><NumInput v={selRow.responsive?.mobile?.gap ?? selRow.gap} min={0} max={128} onChange={(v) => setStructureResponsive(selSection.id, selRow.id, "mobile", { gap: Math.min(128, Math.max(0, v)) })} /></Field>
+              <p className="text-[11px] leading-relaxed text-faint">
+                Sans réglage, la rangée garde exactement son rendu Phase 3B. L’empilement est facultatif : la section s’agrandit si nécessaire.
+              </p>
+              <p className="text-[11px] text-muted">Disposition active — {device} : {describeCmsRowLayout(selRow, device)}</p>
               {selRow.locked && <p className="text-[11px] text-goldsoft">La rangée verrouillée bloque les colonnes et toutes leurs feuilles.</p>}
             </div>
           ) : sel && selColumn && selSection && selParent && isCmsRow(selParent) ? (
@@ -1598,13 +1766,30 @@ export default function PageEditor({
               <Field label="Largeur (%)"><NumInput v={selColumn.width} min={1} max={99} step={0.1} onChange={(v) => setColumnWidth(selSection.id, selParent.id, selColumn.id, v)} /></Field>
               <Field label="Gap vertical (px)"><NumInput v={selColumn.gap} min={0} max={128} onChange={(v) => setStructure(selSection.id, selColumn.id, { gap: Math.min(128, Math.max(0, v)) })} /></Field>
               <Field label="Opacité (%)"><NumInput v={selColumn.opacity * 100} min={0} max={100} onChange={(v) => setStructure(selSection.id, selColumn.id, { opacity: Math.min(1, Math.max(0, v / 100)) })} /></Field>
+              <p className="mb-1.5 mt-3 text-[10px] tracking-[0.2em] text-faint uppercase">Responsive</p>
+              <Field label="Largeur tablette (%)"><NumInput v={selColumn.responsive?.tablet?.width ?? selColumn.width} min={1} max={100} step={0.1} onChange={(v) => setStructureResponsive(selSection.id, selColumn.id, "tablet", { width: Math.min(100, Math.max(1, v)) })} /></Field>
+              <Field label="Largeur mobile (%)"><NumInput v={selColumn.responsive?.mobile?.width ?? 100} min={1} max={100} step={0.1} onChange={(v) => setStructureResponsive(selSection.id, selColumn.id, "mobile", { width: Math.min(100, Math.max(1, v)) })} /></Field>
+              <Field label="Ordre mobile">
+                <select className={inputCls} value={String(selColumn.responsive?.mobile?.order ?? "")} onChange={(event) => setStructureResponsive(selSection.id, selColumn.id, "mobile", { order: event.target.value === "" ? null : Number(event.target.value) })}>
+                  <option value="">Hérité ( ordre du tableau )</option>
+                  {[0, 1, 2, 3].map((order) => <option key={order} value={String(order)}>{order + 1}</option>)}
+                </select>
+              </Field>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Masquée tablette">
+                  <select className={inputCls} value={selColumn.responsive?.tablet?.hidden === true ? "1" : "0"} onChange={(event) => setStructureResponsive(selSection.id, selColumn.id, "tablet", { hidden: event.target.value === "1" })}><option value="0">Non</option><option value="1">Oui</option></select>
+                </Field>
+                <Field label="Masquée mobile">
+                  <select className={inputCls} value={selColumn.responsive?.mobile?.hidden === true ? "1" : "0"} onChange={(event) => setStructureResponsive(selSection.id, selColumn.id, "mobile", { hidden: event.target.value === "1" })}><option value="0">Non</option><option value="1">Oui</option></select>
+                </Field>
+              </div>
               <div className="my-3 flex flex-wrap gap-2">
                 <button type="button" onClick={() => setStructure(selSection.id, selColumn.id, { locked: !selColumn.locked })} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted">{selColumn.locked ? "Déverrouiller" : "Verrouiller"}</button>
                 <button type="button" onClick={() => setStructure(selSection.id, selColumn.id, { hidden: !selColumn.hidden })} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted">{selColumn.hidden ? "Afficher" : "Masquer"}</button>
                 <button type="button" onClick={() => duplicateEl(selSection.id, selColumn.id)} disabled={selReadOnly} className="rounded border border-line px-2.5 py-1.5 text-xs text-muted disabled:opacity-40">Dupliquer</button>
                 <button type="button" onClick={() => removeEl(selSection.id, selColumn.id)} disabled={selReadOnly || selParent.children.length <= 1} className="rounded border border-danger/40 px-2.5 py-1.5 text-xs text-danger disabled:opacity-40">Supprimer</button>
               </div>
-              <p className="text-[11px] text-faint">Pour ajouter du contenu, gardez cette colonne sélectionnée puis choisissez un bloc dans la bibliothèque.</p>
+              <p className="text-[11px] text-faint">Pour ajouter du contenu, gardez cette colonne — ou l’un de ses éléments — sélectionné, puis choisissez un bloc dans la bibliothèque.</p>
             </div>
           ) : sel && selGroup && selSection ? (
             <div>
@@ -1774,8 +1959,8 @@ function ContentEditableText({ value, onChange, onDone, style }: { value: string
 
 // Renderer partagé (évite l'import circulaire avec l'aperçu public)
 import { ElementView } from "@/components/page/element-view";
-function ElementViewLazy({ el }: { el: CmsElement }) {
-  return <ElementView el={el} products={[]} />;
+function ElementViewLazy({ el, formSlug = "" }: { el: CmsElement; formSlug?: string }) {
+  return <ElementView el={el} products={[]} formSlug={formSlug} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -2144,8 +2329,29 @@ function PropsPanel({
               )}
             </div>
           ) : (
-            <Field label="Lien"><Input v={c.href ?? ""} onChange={(v) => onChangeContent({ href: v })} placeholder="/create" /></Field>
+            <>
+              <Field label="Lien"><Input v={c.href ?? ""} onChange={(v) => onChangeContent({ href: v })} placeholder="/boutique, https://…, tel:…, mailto:…" /></Field>
+              {c.href && !resolveCmsButtonHref(c.href) && (
+                <p className="mb-2 text-[11px] text-danger">
+                  Destination refusée : utilisez un lien interne, une URL https, tel: ou mailto:.
+                </p>
+              )}
+              {c.href && resolveCmsButtonHref(c.href) && (
+                <p className="mb-2 text-[11px] text-faint">
+                  Type détecté : {{
+                    internal: "lien interne", external: "lien externe HTTPS",
+                    phone: "appel téléphonique", email: "e-mail",
+                  }[resolveCmsButtonHref(c.href)!.kind]}
+                </p>
+              )}
+            </>
           )}
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Alignement"><select className={inputCls} value={c.align ?? "center"} onChange={(event) => onChangeContent({ align: event.target.value })}><option value="left">Gauche</option><option value="center">Centre</option><option value="right">Droite</option></select></Field>
+            <Field label="Nouvel onglet">
+              <select className={inputCls} value={c.newTab === true ? "1" : "0"} onChange={(event) => onChangeContent({ newTab: event.target.value === "1" })}><option value="0">Non</option><option value="1">Oui</option></select>
+            </Field>
+          </div>
           <div className="grid grid-cols-2 gap-2">
             <Field label="Fond"><ColorInput v={s.bg ?? "#c9a86a"} onChange={(v) => onChangeStyle({ bg: v })} /></Field>
             <Field label="Survol"><ColorInput v={s.hoverBg ?? "#e3cfa4"} onChange={(v) => onChangeStyle({ hoverBg: v })} /></Field>
@@ -2227,9 +2433,75 @@ function PropsPanel({
           <Field label="Libellé"><Input v={c.label ?? ""} onChange={(v) => onChangeContent({ label: v })} /></Field>
         </>
       )}
-      {(el.type === "promo" || el.type === "newsletter" || el.type === "form" || el.type === "testimonials") && (
+      {(el.type === "promo" || el.type === "newsletter" || el.type === "testimonials") && (
         <Field label="Texte principal"><Input v={c.text ?? c.title ?? ""} onChange={(v) => onChangeContent(el.type === "testimonials" ? { title: v } : { text: v })} /></Field>
       )}
+      {el.type === "form" && (() => {
+        const formConfig: CmsFormConfig = normalizeCmsFormConfig(c);
+        const fieldByKey = (key: CmsFormFieldKey) => formConfig.fields.find((field) => field.key === key);
+        const patchField = (key: CmsFormFieldKey, patch: Record<string, unknown>) => {
+          const current = normalizeCmsFormConfig(c).fields;
+          const next = current.map((field) => field.key === key ? { ...field, ...patch } : field);
+          // On conserve TOUJOURS les cinq cles : l'ordre du tableau fait foi.
+          const merged = CMS_FORM_FIELD_KEYS.map((candidate) => next.find((field) => field.key === candidate)
+            ?? { key: candidate, type: candidate, label: candidate, enabled: false, required: false, placeholder: "", rows: 1 });
+          onChangeContent({ ...c, fields: merged });
+        };
+        const moveField = (key: CmsFormFieldKey, direction: -1 | 1) => {
+          const current = [...formConfig.fields];
+          const index = current.findIndex((field) => field.key === key);
+          const nextIndex = index + direction;
+          if (index < 0 || nextIndex < 0 || nextIndex >= current.length) return;
+          [current[index], current[nextIndex]] = [current[nextIndex], current[index]];
+          onChangeContent({ ...c, fields: current });
+        };
+        const toggle = (key: CmsFormFieldKey, prop: "enabled" | "required") => {
+          const field = fieldByKey(key);
+          if (!field) return;
+          patchField(key, { [prop]: !field[prop] });
+        };
+        return (
+          <>
+            <p className="mb-1.5 mt-2 text-[10px] tracking-[0.2em] text-faint uppercase">Formulaire — traitement serveur</p>
+            <Field label="Titre"><Input v={formConfig.title} onChange={(title) => onChangeContent({ ...c, title })} /></Field>
+            <Field label="Description"><textarea rows={2} className={`${inputCls} resize-y`} value={formConfig.description} onChange={(event) => onChangeContent({ ...c, description: event.target.value })} /></Field>
+            <div className="space-y-2">
+              <p className="text-[11px] text-faint">Champs — l’ordre ci-dessous est l’ordre d’affichage</p>
+              {formConfig.fields.map((field, index) => (
+                <div key={field.key} className={`rounded-lg border p-2 ${field.enabled ? "border-line" : "border-dashed border-line opacity-70"}`}>
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="text-[10px] tracking-wide text-gold uppercase">{index + 1}. {field.label}</span>
+                    <div className="flex gap-1">
+                      <button type="button" onClick={() => moveField(field.key, -1)} disabled={index === 0} className="rounded border border-line px-1 text-[10px] text-muted disabled:opacity-30" title="Monter">↑</button>
+                      <button type="button" onClick={() => moveField(field.key, 1)} disabled={index === formConfig.fields.length - 1} className="rounded border border-line px-1 text-[10px] text-muted disabled:opacity-30" title="Descendre">↓</button>
+                    </div>
+                  </div>
+                  <Field label="Libellé"><Input v={field.label} onChange={(label) => patchField(field.key, { label })} /></Field>
+                  <Field label="Texte indicatif"><Input v={field.placeholder} onChange={(placeholder) => patchField(field.key, { placeholder })} /></Field>
+                  {field.type === "message" && (
+                    <Field label="Lignes"><NumInput v={field.rows} min={3} max={20} onChange={(rows) => patchField(field.key, { rows })} /></Field>
+                  )}
+                  <div className="mt-2 flex gap-3">
+                    <label className="flex items-center gap-1.5 text-[11px] text-muted">
+                      <input type="checkbox" checked={field.enabled} onChange={() => toggle(field.key, "enabled")} /> Actif
+                    </label>
+                    <label className="flex items-center gap-1.5 text-[11px] text-muted">
+                      <input type="checkbox" checked={field.required} disabled={!field.enabled} onChange={() => toggle(field.key, "required")} /> Obligatoire
+                    </label>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <Field label="Libellé du bouton"><Input v={formConfig.submitLabel} onChange={(submitLabel) => onChangeContent({ ...c, submitLabel })} /></Field>
+            <Field label="Message de succès"><textarea rows={2} className={`${inputCls} resize-y`} value={formConfig.successMessage} onChange={(event) => onChangeContent({ ...c, successMessage: event.target.value })} /></Field>
+            <Field label="Message d’erreur"><textarea rows={2} className={`${inputCls} resize-y`} value={formConfig.errorMessage} onChange={(event) => onChangeContent({ ...c, errorMessage: event.target.value })} /></Field>
+            <p className="text-[11px] leading-relaxed text-faint">
+              Les envois sont validés et enregistrés côté serveur à partir de la version publiée de la page.
+              Aucun destinataire ni secret n’est stocké dans le CMS.
+            </p>
+          </>
+        );
+      })()}
       {el.type === "faq" && (
         <>
           <p className="mb-1.5 mt-2 text-[10px] tracking-[0.2em] text-faint uppercase">FAQ</p>

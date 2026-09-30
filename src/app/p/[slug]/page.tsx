@@ -34,7 +34,7 @@ export default async function CmsPage({ params }: RouteProps) {
 
   return (
     <main>
-      <PageCanvas page={page.published} products={[]} bp="auto" genericSafety />
+      <PageCanvas page={page.published} products={[]} bp="auto" genericSafety slug={page.slug} />
     </main>
   );
 }

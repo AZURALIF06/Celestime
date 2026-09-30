@@ -75,10 +75,10 @@ export default async function FaqPage() {
   );
   return (
     <main className="mx-auto max-w-3xl px-4 py-14 sm:px-6">
-      <ElementView el={cmsFaq.element} />
+      <ElementView el={cmsFaq.element} formSlug="faq" />
       {cmsFaq.page.sections.flatMap((section) => section.elements)
         .filter((element): element is CmsElement => !isCmsStructuralNode(element) && element.type === "text" && element.content?.role === "editorialBlock")
-        .map((element) => <div key={element.id} className="mt-6"><ElementView el={element} /></div>)}
+        .map((element) => <div key={element.id} className="mt-6"><ElementView el={element} formSlug="faq" /></div>)}
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: faqStructuredData(items) }} />
     </main>
   );

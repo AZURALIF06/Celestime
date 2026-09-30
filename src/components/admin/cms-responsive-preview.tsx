@@ -12,7 +12,7 @@ const MODES: { value: CmsBreakpoint; label: string }[] = [
   { value: "mobile", label: "Mobile" },
 ];
 
-export default function CmsResponsivePreview({ page, products = [] }: { page: CmsPage; products?: DbProduct[] }) {
+export default function CmsResponsivePreview({ page, products = [], slug = "" }: { page: CmsPage; products?: DbProduct[]; slug?: string }) {
   const [breakpoint, setBreakpoint] = useState<CmsBreakpoint>("desktop");
   const width = CMS_BREAKPOINT_WIDTH[breakpoint];
   return (
@@ -34,7 +34,7 @@ export default function CmsResponsivePreview({ page, products = [] }: { page: Cm
       </div>
       <div className="overflow-auto rounded-xl border border-line bg-night/60 p-3">
         <div className="mx-auto" style={{ width, maxWidth: "100%" }}>
-          <PageCanvas page={page} products={products} bp={breakpoint} />
+          <PageCanvas page={page} products={products} bp={breakpoint} slug={slug} />
         </div>
       </div>
     </section>

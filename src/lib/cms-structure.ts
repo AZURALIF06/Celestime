@@ -1,5 +1,11 @@
 import type { CSSProperties } from "react";
 import {
+  resolveCmsColumnFrames,
+  resolveCmsRowHeight,
+  resolveCmsRowLayout,
+} from "@/lib/cms-responsive-rows";
+import type { CmsBreakpoint } from "@/lib/cms-responsive";
+import {
   isCmsColumn,
   isCmsContainer,
   isCmsGroup,
@@ -69,32 +75,41 @@ export function cmsContainerRenderStyle(container: CmsContainer): CSSProperties 
 export function cmsGroupRenderStyle(group: CmsGroup): CSSProperties {
   return absoluteFrame(group);
 }
-export function cmsRowRenderStyle(row: CmsRow): CSSProperties {
+export function cmsRowRenderStyle(row: CmsRow, breakpoint: CmsBreakpoint = "desktop"): CSSProperties {
+  const layout = resolveCmsRowLayout(row, breakpoint);
   return {
     ...absoluteFrame(row),
     display: row.hidden ? "none" : "flex",
     boxSizing: "border-box",
-    gap: row.gap,
-    justifyContent: alignItems(row.alignX),
-    alignItems: "stretch",
+    // Phase 3C : la hauteur suit la disposition résolue (empilée = somme des colonnes).
+    height: resolveCmsRowHeight(row, breakpoint, layout),
+    flexDirection: layout.stacked ? "column" : "row",
+    gap: layout.gap,
+    justifyContent: layout.stacked ? "flex-start" : alignItems(row.alignX),
+    alignItems: layout.stacked ? "stretch" : "stretch",
     overflow: "visible",
   };
 }
 
-export function cmsColumnRenderStyle(column: CmsColumn, row: CmsRow): CSSProperties {
-  const frame = resolveCmsRowColumnFrames(row).find((entry) => entry.column.id === column.id)?.frame;
+export function cmsColumnRenderStyle(column: CmsColumn, row: CmsRow, breakpoint: CmsBreakpoint = "desktop"): CSSProperties {
+  const layout = resolveCmsRowLayout(row, breakpoint);
+  const entry = layout.columns.find((candidate) => candidate.column.id === column.id);
+  const frame = resolveCmsColumnFrames(row, breakpoint, layout).find((candidate, index) => layout.columns[index]?.column.id === column.id);
+  const hidden = entry?.hidden ?? column.hidden === true;
   return {
     position: "relative",
     flex: "0 0 auto",
     width: frame?.w ?? 0,
-    height: "100%",
+    // En disposition empilée la colonne prend sa hauteur naturelle, sinon elle
+    // occupe la hauteur de la rangée comme en Phase 3B.
+    height: layout.stacked ? (frame?.h ?? 0) : "100%",
     minWidth: 0,
     zIndex: column.z,
     opacity: column.opacity,
-    display: column.hidden ? "none" : "flex",
+    display: hidden ? "none" : "flex",
     flexDirection: "column",
     gap: column.gap,
-    justifyContent: alignContent(row.alignY),
+    justifyContent: layout.stacked ? "flex-start" : alignContent(row.alignY),
     overflow: "visible",
   };
 }

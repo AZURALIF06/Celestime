@@ -7,7 +7,8 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { CmsElement } from "@/lib/cms";
 import type { DbProduct } from "@/lib/catalog";
 import { eur } from "@/lib/pricing";
-import { getCmsVideoEmbedUrl, isActiveGenericCmsProduct, isValidCmsImageSource, safeCmsHref } from "@/lib/cms";
+import { getCmsVideoEmbedUrl, isActiveGenericCmsProduct, isValidCmsImageSource, resolveCmsButtonHref, safeCmsHref } from "@/lib/cms";
+import { CmsFormBlock } from "@/components/page/cms-form-block";
 
 const FONTS: Record<string, string> = {
   serif: "'Cormorant Garamond', Georgia, serif",
@@ -216,7 +217,7 @@ function CmsPanorama({ src, alt, initialPosition, autoScroll, speed, loop, radiu
   );
 }
 
-export function ElementView({ el, products = [], genericSafety = false }: { el: CmsElement; products?: DbProduct[]; genericSafety?: boolean }) {
+export function ElementView({ el, products = [], genericSafety = false, formSlug = "" }: { el: CmsElement; products?: DbProduct[]; genericSafety?: boolean; formSlug?: string }) {
   const s = el.style ?? {};
   const c = el.content ?? {};
   const inner = (() => {
@@ -321,7 +322,12 @@ export function ElementView({ el, products = [], genericSafety = false }: { el: 
           </div>
         );
       case "button": {
-        const href = genericSafety ? safeCmsHref(c.href) : c.href || "#";
+        // Phase 3C : destinations validées (interne, HTTPS, tel:, mailto:).
+        // `javascript:` et consorts sont rejetés par resolveCmsButtonHref.
+        const target = resolveCmsButtonHref(c.href);
+        const href = target ? target.href : null;
+        const external = target?.kind === "external";
+        const newTab = c.newTab === true && (external || target?.kind === "phone" || target?.kind === "email");
         const buttonStyle = {
           display: "inline-block",
           padding: "14px 30px",
@@ -338,9 +344,15 @@ export function ElementView({ el, products = [], genericSafety = false }: { el: 
           maxWidth: "100%",
           textAlign: "center" as const,
         };
+        const justify = c.align === "left" ? "flex-start" : c.align === "right" ? "flex-end" : "center";
+        const body = href
+          ? newTab
+            ? <a href={href} style={buttonStyle} target="_blank" rel="noopener noreferrer nofollow">{c.text}</a>
+            : <Link href={href} style={buttonStyle}>{c.text}</Link>
+          : <span style={buttonStyle}>{c.text}</span>;
         return (
-          <div className="flex h-full w-full items-center justify-center">
-            {href ? <Link href={href} style={buttonStyle}>{c.text}</Link> : <span style={buttonStyle}>{c.text}</span>}
+          <div className="flex h-full w-full items-center" style={{ justifyContent: justify }}>
+            {body}
           </div>
         );
       }
@@ -418,15 +430,8 @@ export function ElementView({ el, products = [], genericSafety = false }: { el: 
           </form>
         );
       case "form":
-        return (
-          <div className="flex h-full w-full flex-col gap-2.5 overflow-hidden p-4" style={{ background: s.bg ?? "#0c0e16", borderRadius: s.radius ?? 16, border: "1px solid #22263a" }}>
-            {c.text && <p className="text-sm font-medium text-ink">{c.text}</p>}
-            <input placeholder="Votre nom" aria-label="Votre nom" className="rounded-lg border border-line bg-night px-3 py-2 text-sm text-ink placeholder:text-faint" />
-            <input type="email" placeholder="Votre e-mail" aria-label="Votre e-mail" className="rounded-lg border border-line bg-night px-3 py-2 text-sm text-ink placeholder:text-faint" />
-            <textarea rows={3} placeholder="Votre message" aria-label="Votre message" className="w-full resize-none rounded-lg border border-line bg-night px-3 py-2 text-sm text-ink placeholder:text-faint" />
-            <button className="rounded-full bg-gold py-2.5 text-xs font-medium tracking-[0.14em] text-night uppercase">Envoyer</button>
-          </div>
-        );
+        // Phase 3C : traitement serveur réel, pas de simulation.
+        return <CmsFormBlock el={el} slug={formSlug} />;
       case "testimonials":
         return (
           <div className="h-full w-full overflow-hidden">

@@ -16,7 +16,10 @@ function loadTypeScriptModule(path, requireShim = require) {
   return transpiledModule.exports;
 }
 
-const cms = loadTypeScriptModule("src/lib/cms.ts");
+// Phase 3C : cms.ts importe desormais le validateur de formulaire, resolu par
+// le meme transpileur. Aucun controle existant n'est retire.
+const cmsForm = loadTypeScriptModule("src/lib/cms-form.ts");
+const cms = loadTypeScriptModule("src/lib/cms.ts", (name) => name === "./cms-form.ts" ? cmsForm : require(name));
 const responsive = loadTypeScriptModule("src/lib/cms-responsive.ts", (name) => name === "@/lib/cms" ? cms : require(name));
 const canvas = loadTypeScriptModule("src/lib/cms-editor-canvas.ts");
 let passed = 0;

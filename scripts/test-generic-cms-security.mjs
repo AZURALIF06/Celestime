@@ -7,14 +7,33 @@ import { fileURLToPath } from "node:url";
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+function transpileLib(relativePath) {
+  const source = readFileSync(resolve(root, relativePath), "utf8");
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const target = { exports: {} };
+  new Function("exports", "require", "module", "__filename", "__dirname", compiled)(
+    target.exports,
+    require,
+    target,
+    resolve(root, relativePath),
+    resolve(root, "src/lib"),
+  );
+  return target.exports;
+}
+
+// Phase 3C : cms.ts importe desormais le validateur de formulaire, resolu par
+// le meme transpileur. Aucun controle existant n'est retire.
+const cmsForm = transpileLib("src/lib/cms-form.ts");
+const cmsModule = { exports: {} };
 const source = readFileSync(resolve(root, "src/lib/cms.ts"), "utf8");
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
-const cmsModule = { exports: {} };
 new Function("exports", "require", "module", "__filename", "__dirname", compiled)(
   cmsModule.exports,
-  require,
+  (name) => (name === "./cms-form.ts" ? cmsForm : require(name)),
   cmsModule,
   resolve(root, "src/lib/cms.ts"),
   resolve(root, "src/lib"),
@@ -110,8 +129,17 @@ check("E. lien javascript refusé et inerte au rendu", () => {
   assert.equal(cms.isValidGenericCmsPage(page), false);
   assert.equal(cms.isValidGenericCmsPage(page, { forRendering: true }), true);
   assert.equal(cms.safeCmsHref("javascript:alert(1)"), null);
+  // Phase 3C : le bouton passe par un validateur de destination dedie. Le
+  // controle source sur la chaine exacte est remplace par une verification
+  // COMPORTEMENTALE du meme exigence (le renderer ne recoit jamais de href).
+  assert.equal(cms.resolveCmsButtonHref("javascript:alert(1)"), null);
   const renderer = readFileSync(resolve(root, "src/components/page/element-view.tsx"), "utf8");
-  assert.ok(renderer.includes("genericSafety ? safeCmsHref(c.href) : c.href || \"#\""));
+  assert.ok(renderer.includes("resolveCmsButtonHref(c.href)"), "le renderer resout la destination avant de rendre");
+  assert.ok(!renderer.includes("genericSafety ? safeCmsHref(c.href)"), "plus de href brut dans le cas button");
+  for (const kind of ["internal", "external", "phone", "email"]) {
+    const sample = { internal: "/boutique", external: "https://example.org/p", phone: "tel:+33612345678", email: "mailto:a@b.fr" }[kind];
+    assert.equal(cms.resolveCmsButtonHref(sample).kind, kind);
+  }
 });
 check("F. URL protocol-relative refusée", () => {
   assert.equal(cms.isValidCmsLink("//evil.example/path"), false);

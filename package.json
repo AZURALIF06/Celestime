@@ -9,7 +9,9 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test:cms-structure": "node --experimental-strip-types --test tests/cms-*.test.mjs"
+    "test:cms-structure": "node --experimental-strip-types --test tests/cms-*.test.mjs",
+    "test:cms-phase3b-scripts": "node scripts/test-cms-editor-canvas.mjs && node scripts/test-cms-responsive.mjs && node scripts/test-generic-cms-security.mjs",
+    "test:cms": "npm run test:cms-structure && npm run test:cms-phase3b-scripts"
   },
   "dependencies": {
     "dotenv": "17.3.1",
